@@ -1,0 +1,510 @@
+---
+title: "Mandatory Assignment 1 - AEF"
+subtitle: "Andreas rmz299, Nicklas zpc109 & Sebastian cpx862"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: no
+#  html_document: default
+#    fig_height: 4
+#    fig_width: 4
+#    theme: readable
+#    toc: yes
+---
+
+
+```{r message=FALSE, include=FALSE}
+rm(list = ls()) # cleans environment
+# Install required packages
+library(ggplot2)
+library(RSQLite)
+library(tidyverse)
+library(lubridate)
+library(scales)
+library(lmtest)
+library(sandwich)
+library(gridExtra)
+library(TTR)
+
+# Set working directory
+setwd('/Users/sebastianhansen/Documents/UNI/AEF/data')
+```
+
+# Problem 1
+
+We want to conduct an empirical investigation of the momentum effect. For that purpose we use the provided ```tidy_finance.sqlite``` database. This database consists of The Center for Research in Security Prices (CRSP) monthly return data for a large number of stocks listed on american exchanges and the Fama-French 3 factor portfolio returns which replicates the monthly market excess returns.
+
+```{r include=FALSE}
+# Create connection to database
+tidy_finance <- dbConnect(SQLite(), "tidy_finance.sqlite", extended_types = TRUE)
+# Collect data
+crsp_monthly <- tbl(tidy_finance, "crsp_monthly") %>% collect()
+factors_ff_monthly <- tbl(tidy_finance, "factors_ff_monthly") %>% collect()
+```
+
+The variable *permno* denotes the specific stock in the CRSP data. The variable *ret_excess* denotes the excess return in percent (difference of return on the stock and risk-free asset) measured at the end of each month. The variable *mktcap* denotes the market capitalization in million of USD. 
+
+We can easily compute a summary statistics of the excess returns and market capitalization to get the result below:
+
+```{r echo=FALSE}
+# Summarised view of excess return and market cap
+excees_return <- crsp_monthly %>% 
+  group_by(month) %>% 
+  summarise(across('ret_excess', list(mean = mean, 
+                                    sd = sd, 
+                                    min = min,
+                                    q25 = ~quantile(., 0.25),
+                                    median = median,
+                                    q75 = ~quantile(., 0.75), 
+                                    max = max),
+                    .names = "{.fn} return")) %>% 
+ summarise(across(-month, mean))
+
+market_cap <- crsp_monthly %>% 
+  group_by(month) %>% 
+  summarise(across('mktcap', list(mean = mean, 
+                                    sd = sd, 
+                                    min = min,
+                                    q25 = ~quantile(., 0.25),
+                                    median = median,
+                                    q75 = ~quantile(., 0.75), 
+                                    max = max),
+                    .names = "{.fn} return")) %>% 
+ summarise(across(-month, mean)) 
+
+names <- c('ret_excess (pct.)', 'mktcap ($mio.)')
+data.frame(rbind(excees_return, market_cap), row.names = names) %>%  knitr::kable(digits=3)
+```
+
+We observe that the excess return has a mean of $0.0083$ but with a standard deviation of $0.1523$ which is almost 20 times bigger there is a great deal of uncertainty to whether the return is positive or negative. We observe in addition that 50 pct. of stocks perform worse than the mean return which clearly indicates a skewed distribution of returns - some stocks are certainly more responsible than others for delivering a expectation of 8 pct. In the following we investigate, if we can find a strategy that profit from this.
+
+We also take a look at the market capitalisation. Again there is really a significant difference in mean value of 1814.5 mio. USD and the median market cap. of only 179 mio. USD. In addition we also observe a standard deviation that is much larger than the mean estimate. This has the same interpretation as for the excess return, that there is a great difference in firms and we of course want to profit from the best performing.
+
+# Problem 2
+
+We want to generate a new column ```ret_excess_lag``` that contains the previous month excess return for the same firm for each row in the sample. 
+
+The stated implementation can not simply be used due to the absence of data for some months of certain stocks in the data. This has the implication when we want to calculate for example lagged return it is not clear which months to use, if one is missing. We state a couple examples of where certain months are missing in the dataset by subsetting on when certain ```permno``` / stocks does not have data for several months or years.
+```{r echo=FALSE}
+# note these row operations based on months requires some computational power and might take a couple of minutes to run
+crsp_monthly %>% 
+  group_by(permno) %>%
+  filter((month!=lag(month) %m+% months(1) & (permno==lag(permno))) | 
+            (month!=lead(month) %m-% months(1)) & (permno==lead(permno))) %>%
+  select(permno, date, month) %>% head() %>%
+  knitr::kable()
+```
+
+Thus we have to be careful when computing variables such as the lagged return, because it will be incorrect to let the return of April become the return of November due to missing observations. Thus we will disregard those from now on.
+
+```{r}
+crsp_monthly <- crsp_monthly %>% 
+    group_by(permno) %>%
+    mutate(ret_excess_lag = ifelse((month != lag(month, 1) %m+% months(1)),
+                                as.numeric(NA), 
+                                lag(ret_excess)))
+ 
+```
+
+To investigate the auto-correlation of excess returns we perform a linear regression (without intercept) on the monthly excess return and its lag. 
+
+```{r}
+# Perform linear regression to test for auto-corrolation
+coeftest(lm(formula = ret_excess ~ ret_excess_lag - 1, data=crsp_monthly)) 
+```
+
+We see that the estimate of the slope is $\hat{\beta}=-0.01498$ with a standard error of $SE=0.00056$ and $p$-value way below the standard threshold of .05 (meaning it is significant). As 0 is not in the 95% confidence-interval $\hat{\beta} \pm 1.96 * SE = [-0.0161\; , \; -0.0139]$ then we conclude that the auto-correlation is less than (and thus different from) 0.
+
+This results would lead us to expect a negative excess return at time $t$ if the excess return at time $t-1$ was positive - and vice versa. To be exact, the expected return at time $t$ would be equal to about $-1.5$% times the excess return of $t-1$, i.e. $E[r_t] \approx -0.015 \times r_{t_1}$. This is of course very general as the regression is based on all assets across all the time-points available. In reality the estimate of the slope might very well vary. Hence, we see no sign of short-term momentum but rather short-term reversal.
+
+# Problem 3
+
+We want to generate a new column ```mktcap_lag_12``` that contains the firms’ market cap. 12-month prior to the measurement date. 
+
+Again we are careful when computing lagged observation as previously argued, by considering the name of the month and year from the previous observation of the respective stock. We choose to measure the momentum in terms of relative change in market capitalization during a period that covers the months from $t-12$ until $t-1$. This is explicitly carried out in the following way:
+$$Mom_{i,t} = 100 \cdot (mc_{i,t-1}-mc_{i,t-12}) / mc_{i,t-12},$$
+where $mc_{i,t}$ measures market capitalization for firm $i$ at time/month $t$. These calculations are implemented below:
+
+```{r}
+# Calculate 12-month lag of market cap
+crsp_monthly <- crsp_monthly %>% 
+    group_by(permno) %>%
+    mutate(mktcap_lag_12 = ifelse((month != lag(month, 12) %m+% years(1)),
+                                as.numeric(NA), 
+                                lag(mktcap, 12)))
+
+# Calculate momentum
+crsp_monthly <- crsp_monthly %>% 
+    group_by(permno) %>%
+    mutate(mom = ifelse(((month != lag(month, 12) %m+% years(1)) &
+                           (month != lag(month, 1) %m+% months(1))),
+                                as.numeric(NA), 
+                                100 * (mktcap_lag - mktcap_lag_12)/ mktcap_lag_12))
+```
+
+
+The difference between computing momentum based on market capitalization and prices relies on the latter's negative correlation to the number of shares. In order to maintain the same value of the company the price of the stock is affected if a company expands the number of shares or make use of a buy-back programme. Thus from a statistical point of view the market cap based momentum would be preferred.
+
+We summarize the momentum statistics:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+crsp_monthly %>% 
+  group_by(month) %>% 
+  summarise(mean = mean(mom, na.rm=T),
+            sd = sd(mom, na.rm=T),
+            q05 = quantile(mom, probs=0.05, na.rm=T),
+            q25 = quantile(mom, probs=0.25, na.rm=T),
+            median = median(mom, na.rm=T),
+            q75 = quantile(mom, probs=0.75, na.rm=T),
+            q95 = quantile(mom, probs=0.95, na.rm=T),
+            min = min(mom, na.rm=T),
+            max = max(mom, na.rm=T)
+            ) %>% summarize(across(-month, ~mean(.x, na.rm=T) )) %>% 
+  knitr::kable(digits = 2)
+                 
+```
+
+We observe a mean momentum in market capitalization of 18.9 mio. USD. This comes with a standard deviation of about 92.2 and a median of 5.61 - these estimates contributes to the interpretation that the distribution of momentums are heavily skewed. This is in alignment to what we also commented on in question 1.
+
+In addition we investigate the correlation between momentum and $\log(\verb+mktcap+)$.
+
+```{r message=FALSE, warning=FALSE}
+# Calculate correlation of momentum and log og market cap
+tmp <- crsp_monthly %>% filter(!is.na(mom), !is.na(mktcap)) %>% select(mom, mktcap)
+cor(tmp$mom, log(tmp$mktcap)) %>% round(3)
+```
+
+We see little to no correlation between momentum and log of market cap.
+
+
+# Problem 4
+
+We investigate now the relation between momentum and future stock returns. We perform a univariate portfolio sorting based on the momemtum variable we calculated above.
+
+We create a function ```assign_portfolio``` for assigning portfolios for each decile of moment and calculate the mean of momentum and market capitalization for each of these portfolios across all the time periods. 
+
+```{r include=FALSE}
+# Create function to assign portfolios
+assign_portfolio <- function(data, var, n_portfolios) {
+  breakpoints <- data %>%
+    summarize(breakpoint = quantile({{ var }},
+      probs = seq(0, 1, length.out = n_portfolios + 1),
+      na.rm = TRUE
+    )) %>%
+    pull(breakpoint) %>%
+    as.numeric()
+
+  data %>%
+    mutate(portfolio = findInterval({{ var }},
+      breakpoints,
+      all.inside = TRUE
+    )) %>%
+    pull(portfolio)
+}
+```
+
+We create portfolios that is assigned according to the momentum-decile of the stocks.
+
+```{r include=FALSE}
+# Make decile-portfolios based on momentum
+decile_portfolios <- crsp_monthly %>% 
+  filter(!is.na(mktcap_lag_12), !is.na(mom)) %>%
+  group_by(month) %>%
+  mutate(
+    portfolio = assign_portfolio(data = cur_data(),
+                                 var = mom,
+                                 n_portfolios = 10),
+    portfolio = as.factor(portfolio)
+  )
+```
+
+
+We calculate the equal-weighted average of momentum and market capitalization lag for each of the decile portfolios across all the time periods This is used purely as an intuitive view of how our strategy works and it is summarised below:
+
+```{r echo=FALSE}
+# Calculate average momentum and market cap for the decile-portfolios
+decile_portfolios %>%
+  group_by(portfolio) %>% 
+  summarize(momentum = mean(mom), 
+            market_cap = mean(mktcap)) %>%
+  knitr::kable(digits=2)
+```
+
+We observe the overall tendency that high-momentum portfolios share a large market capitalization. There is however some contradictions to this statement, but this is just to illustrate the overall strategy.
+
+For each of the portfolios we calculate the monthly weighted-average of excess return where the weights are determined by the lagged market cap.
+
+```{r}
+# For each month, and each portfolio: Calculate weighted-average of excess return 
+# weighted by lagged market cap
+decile_portfolios_month <- decile_portfolios %>%
+  group_by(portfolio, month) %>% 
+  summarize(ret_excess_weighted = weighted.mean(ret_excess, mktcap_lag), .groups = "drop")
+```
+
+
+Using linear regression we can find the CAPM-adjusted alphas and market betas for each of the momentum sorted portfolios and we also calculate the mean (over all months) of the weighted-by-marketcap average excess return. 
+
+
+```{r include=FALSE}
+# Calculate CAPM-parameters and average (across time) of the weighted-average-excess return for the portfolios
+Parameters <- decile_portfolios_month %>%
+  left_join(factors_ff_monthly, by = "month") %>%
+  group_by(portfolio) %>%
+  summarise(
+    alpha = as.numeric(lm(ret_excess_weighted ~ 1 + mkt_excess)$coefficients[1]),
+    beta = as.numeric(lm(ret_excess_weighted ~ 1 + mkt_excess)$coefficients[2]),
+    ret_CAPM = mean(ret_excess_weighted)
+  )
+```
+
+
+```{r echo=FALSE, out.width = '75%', fig.align = "center"}
+p1 <- Parameters %>%
+  ggplot(aes(x = portfolio, y = alpha, fill = portfolio)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Alphas of momentum-sorted portfolios",
+    x = "",
+    y = "CAPM alpha",
+    fill = "Portfolio"
+  ) +
+  scale_y_continuous(labels = percent) +
+  theme(legend.position = "None")
+
+p2 <- Parameters %>%
+  ggplot(aes(x = portfolio, y = beta, fill = portfolio)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Betas of momentum-sorted portfolios",
+    x = "Portfolio",
+    y = "market beta",
+    fill = "Portfolio"
+  ) +
+  theme(legend.position = "None")
+
+grid.arrange(p1, p2)
+```
+
+The results suggests that for the lower momentum portfolios a negative relation between market betas and future stock returns and a postive relation for the higher momentum portfolios. The former is a contradiction to the predictions of the CAPM that says returns must increase with beta. 
+
+
+We create a strategy of going long in the portfolio with the highest momentum and short the one with the lowest momentum.
+
+```{r include=FALSE}
+# Create a portfolio going long in the portfolio with highest momentum and 
+# Create a portfolio going short in the portfolio with the lowest momentum
+momentum_longshort <- decile_portfolios_month %>%
+  ungroup() %>%
+  mutate(portfolio = case_when(
+    portfolio == max(as.numeric(portfolio)) ~ "high",
+    portfolio == min(as.numeric(portfolio)) ~ "low"
+  )) %>%
+  filter(portfolio %in% c("low", "high")) %>%
+  pivot_wider(month, names_from = portfolio, values_from = ret_excess_weighted) %>%
+  mutate(long_short = high - low) %>%
+  left_join(factors_ff_monthly, by = "month")
+```
+
+To test the strategy of following the momentum, we look at the historical performance. From the plot in the middle it is quite difficult to see any clear sign of consistent good or bad performance. However, looking at the two components ("high" and "low") we note that the "low"-strategy seems to outperform the "high". We will however perform some statistical tests to evaluate the strategy further. 
+
+```{r echo=FALSE, out.width = '75%', fig.align = "center"}
+# Show historical results of the long-short-portfolios
+momentum_longshort %>%
+  group_by(year = year(month)) %>%
+  summarize(
+    low = prod(1 + low),
+    high = prod(1 + high),
+    long_short = prod(1 + long_short)
+  ) %>%
+  pivot_longer(cols = -year) %>%
+  ggplot(aes(x = year, y = 1 - value, fill = name)) +
+  geom_col(position = "dodge") +
+  facet_wrap(~name, ncol = 1) +
+  theme(legend.position = "none") +
+  scale_y_continuous(labels = percent) +
+  labs(
+    title = "Annual returns of momentum portfolios",
+    x = NULL, y = NULL
+  )
+```
+
+To test whether or not the null hypothesis - that average portfolio excess returns are equal to zero - can be rejected in order to conclude that the strategy has a beta different from 0 we perform a t-test using the Newey and West $t$-statistic. Using a significance-level of $0.05$ we will have to reject the null-hypothesis although the result is only border-line significance. That is the strategy is *not* market neutral, however this conclusion cannot be stated without some uncertainty.
+
+```{r}
+coeftest(lm(long_short ~ 1, data = momentum_longshort), vcov = NeweyWest)
+```
+
+We can furthermore test if the strategy delivers abnormal excess returns using the same method. Again we use a significance-level of $0.05$ and see a significance positive result for the alpha (the intercept). This leads us to the conclusion of somewhat abnormal excess returns using the strategy.  
+
+```{r}
+coeftest(lm(long_short ~ 1 + mkt_excess, data = momentum_longshort), vcov = NeweyWest)
+```
+
+# Problem 5
+
+We want to investigate how the measure of momentum plays a role in the relation between momentum and future stock returns and ultimately the performance of our strategy. We repeat the univariate sorting but this time using the $k$-month-ahead excess return as the outcome variable for values of $k\in\{1,3,6,12\}$.
+
+We extent our calculations from above using the exact same procedure of going long in the 10th decile and short in the 1st decile of momentum performance. We summarise below how each of the $k$-month-ahead methods alternate our performance outcome in terms of risk adjusted return: 
+```{r echo=FALSE}
+# Create variables for k-months "forward"-excess-returns, for k={1,3,6,12} 
+decile_portfolios_k <- decile_portfolios %>% 
+  group_by(permno) %>%
+  mutate(ret_excess_1 = ret_excess,
+         ret_excess_3 = lead(ret_excess, n=2),
+         ret_excess_6 = lead(ret_excess, n=5),
+         ret_excess_12 = lead(ret_excess, n=11))
+
+
+# Calculate weighted-average of k-months "forward"-excess-returns (wgt. by 1-lagged market cap)
+decile_portfolios_month_k <- decile_portfolios_k %>%
+  group_by(portfolio, month) %>% 
+  summarise(ret_excess_wgt_1 = weighted.mean(ret_excess_1, mktcap_lag,  na.rm = T),
+            ret_excess_wgt_3 = weighted.mean(ret_excess_3, mktcap_lag,  na.rm = T),
+            ret_excess_wgt_6 = weighted.mean(ret_excess_6, mktcap_lag,  na.rm = T),
+            ret_excess_wgt_12 = weighted.mean(ret_excess_12, mktcap_lag, na.rm = T),
+            .groups = "drop")
+
+# Create the strategy of going long in "high"-momentum and short in "low"
+mom_high_low_k <- decile_portfolios_month_k %>%
+  ungroup() %>%
+  mutate(portfolio = case_when(
+    portfolio == max(as.numeric(portfolio)) ~ "high",
+    portfolio == min(as.numeric(portfolio)) ~ "low"
+  )) %>%
+  filter(portfolio %in% c("low", "high"))
+
+# For each k: Calculate weighted-excess-return for the long_short strategy
+# Initiate, for k=1
+momentum_longshort_k <- mom_high_low_k  %>%
+  pivot_wider(month, names_from = portfolio, values_from = ret_excess_wgt_1) %>%
+  mutate(long_short_1 = high - low) 
+
+# For k = {3,6,12}
+for (k in c(3,6,12)){
+  tmp <- mom_high_low_k  %>%
+  pivot_wider(month, names_from = portfolio, values_from = paste0('ret_excess_wgt_',k)) %>%
+  mutate(long_short = high - low) 
+  
+  names(tmp)[length(tmp)] <- paste0('long_short_',k)
+  
+  momentum_longshort_k <- momentum_longshort_k %>% left_join(tmp[, c('month', paste0('long_short_',k))], by='month')
+}
+
+# Add remaining columns
+momentum_longshort_k <- momentum_longshort_k %>% left_join(factors_ff_monthly, by = "month")
+
+
+# Calculate risk-adjusted performance, i.e. E(r_i) / SD(r_i)
+apply(momentum_longshort_k[4:7], 2, function(x) mean(x, na.rm=T) / sd(x, na.rm=T)) %>%
+  knitr::kable(digits=3)
+```
+
+We obtain the result that for the time-horizon of $k=3$ our strategy delivers the highest risk-adjusted measure (defined as Sharpe ratio) of 0.128.
+
+
+# Problem 6
+
+As the turnover obviously increases with variation of the momentum we can (among other strategies) try to use a moving-average of the last 6 months of the momentum, i.e. semi-annual-smoothing. This will seek to find a more stable, long-termed momemtum. However, as we still want to put more weight on the more recent observations we will use the Exponential-Moving-Average (EMA). This comes at the cost of loosing at least 6 observations as this is the minimum number of observations requried to calculate the EMA. We use the EMA as implemented in the package ```library(TTR)```.
+
+Our approach is similar to the above. Instead of the $Mom_{i,t}$ calculations, we perform Exponential-Moving-Average and similarly assign portfolios based on deciles. The strategy is then to go long in highest decile and short in the lowest, again similar to above. 
+
+
+```{r include=FALSE}
+# Calculate EMA_6 of momentum
+crsp_monthly <- crsp_monthly %>% 
+  group_by(permno) %>% 
+  filter(!is.na(mom)) %>%
+  filter(n_distinct(date, na.rm=T) >= 7) %>% 
+  mutate(mom_EMA_6 = EMA(mom, 6))
+
+# Assign portfolios
+decile_portfolios_2 <- crsp_monthly %>% 
+  filter(!is.na(mktcap_lag_12), !is.na(mom_EMA_6)) %>%
+  group_by(month) %>%
+  mutate(
+    portfolio = assign_portfolio(data = cur_data(),
+                                 var = mom_EMA_6,
+                                 n_portfolios = 10),
+    portfolio = as.factor(portfolio)
+  )
+
+# For each month, and each portfolio: Calculate weighted-average of excess return (weighted by lagged market cap)
+decile_portfolios_month_2 <- decile_portfolios_2 %>%
+  group_by(portfolio, month) %>% 
+  summarize(ret_excess_weighted = weighted.mean(ret_excess, mktcap_lag), .groups = "drop")
+
+
+# Create a portfolio going long in the portfolio with highest momentum and 
+# Create a portfolio going short in the portfolio with the lowest momentum
+momentum_longshort_2 <- decile_portfolios_month_2 %>%
+  ungroup() %>%
+  mutate(portfolio = case_when(
+    portfolio == max(as.numeric(portfolio)) ~ "high",
+    portfolio == min(as.numeric(portfolio)) ~ "low"
+  )) %>%
+  filter(portfolio %in% c("low", "high")) %>%
+  pivot_wider(month, names_from = portfolio, values_from = ret_excess_weighted) %>%
+  mutate(long_short = high - low) %>%
+  left_join(factors_ff_monthly, by = "month")
+
+```
+
+```{r echo=TRUE}
+# Calculate sharp-ratio for the EMA_6-strategy
+mean(momentum_longshort_2$long_short) / sd(momentum_longshort_2$long_short)
+```
+
+We find the overall performance of our Exponential-Moving-Average based momentum strategy to deliver a risk adjusted measure (in terms of Sharpe Ratio) of $0.11$. This return outperforms the standard momentum strategy from the previous investigations and it is almost identical to the one obtained from the 3-months-ahead momentum calculations. This shows that our new strategy is able to capture the momentum premium to some extent. The point of this strategy is to use more stable and reasonable estimation of the momentum, whereas we before arrived at the somewhat arbitrary number of using 3-months lag in momentum calculations.
+
+Incorporating trading costs we analyse which of the strategies that has the lowest number of trades. This must of course mean that strategy is preffered to the other.
+
+```{r echo=FALSE}
+# Mark trades in the classical momentum-strategy
+momentum_trades <- decile_portfolios[c('permno', 'date', 'portfolio')] %>%
+  filter(portfolio %in% c(1,10)) %>%
+  group_by(portfolio, permno) %>%
+  mutate(portfolio_lag = lag(portfolio),
+         trade = case_when(
+           portfolio == portfolio_lag ~ 0,
+           is.na(portfolio_lag) ~ 1))
+
+# Mark trades in the EMA_6 momentum-strategy
+momentum_trades_2 <- decile_portfolios_2[c('permno', 'date', 'portfolio')] %>%
+  filter(portfolio %in% c(1,10)) %>%
+  group_by(portfolio, permno) %>%
+  mutate(portfolio_lag = lag(portfolio),
+         trade = case_when(
+           portfolio == portfolio_lag ~ 0,
+           is.na(portfolio_lag) ~ 1))
+
+# Calculate turnover statistics for the classical momemtum-strategy
+turnover <- momentum_trades %>% 
+  group_by(portfolio) %>%
+  summarise(no_of_trades = sum(trade, na.rm=T),
+            freq_of_trades = mean(trade, na.rm=T)
+            )
+
+# Calculate turnover statistics for the EMA_6 momemtum-strategy
+turnover_2 <- momentum_trades_2 %>% 
+  group_by(portfolio) %>%
+  summarise(no_of_trades = sum(trade, na.rm=T),
+            freq_of_trades = mean(trade, na.rm=T)
+            )
+
+# Present results for turnover
+turnover_results <- as.data.frame(rbind(turnover, turnover_2))
+row.names(turnover_results) <- c('Classical momentum (short positions)', 
+                                 'Classical momentum (long positions)', 
+                                 'EMA momentum (short positions)', 
+                                 'EMA momentum (long positions)')
+turnover_results %>% knitr::kable(digits=3)
+```
+
+We see from the turnover results in the above table, that our Exponential-Moving-Average strategy has a significantly lower number of trades. This is important when incorporating transaction costs - it has a lot to say for your total profit if a larger number of trades can be cut off. This leads to the overall conclusion, that our Exponential-Moving-Average based momentum strategy outperforms the regular momentum strategy when considering both risk adjusted return and transaction costs.
+
+
+
+
+
+
