@@ -1,0 +1,478 @@
+---
+title: "MA1 - Advanced Empirical Finance"
+date: "9 May 2021"
+header-includes:
+  \usepackage[utf8]{inputenc}
+  \usepackage[T1]{fontenc}
+  \usepackage{floatrow}
+  \floatsetup[figure]{capposition=top}
+  \floatplacement{figure}{H}
+  \floatplacement{table}{H}
+geometry: margin=1.9cm
+fontsize: 12pt
+line-height: 1.5
+output:
+    pdf_document
+toc: yes
+toc_depth: 3
+classoption: a4paper
+
+---
+
+
+\newpage
+
+```{r setup, include = FALSE}
+# Load pakcages
+library("tidyverse")
+library("tidyquant")
+library("rlist")
+library("MASS")
+library("xtable")
+library("knitr")
+library("quadprog")
+
+# Set seed for results to be reproducible
+set.seed(1000)
+
+```
+
+## Introduction
+In this assignment we show that estimation uncertainty for plug-in estimates is likely to cause inefficient portfolio weight allocations. We do so by replicating the findings of Jobson and Korkie (1980) who investigate the finite-sample properties of the plug-in portfolio estimates. We base our analysis on a data set consisting of monthly returns of 10 industry-sorted portfolios from July 1926 to November 2020. In order to replicate their results we assume that the historical sample moments are the true ones. We then simulate sets of 250 hypothetical finite samples of various lengths and determine their implied plug-in estimates of the mean-variance frontier. We use the results to get a sense of the economic loss measured by average Sharpe-ratios for the sets of 250 simulations with different sample lengths. We find that the economic is larger when smaller sample sizes are used to obtain the plug-in estimates. Finally, we consider if alternative portfolio optimization strategies can minimize the estimation uncertainty and hereby lower the economic loss.
+
+## Exercise 1
+```{r Load data, echo = FALSE}
+# Load and clean data
+data <- read.csv("10_Industry_Portfolios.csv", skip = 11) %>%
+  rename(date = X) %>%
+  mutate(date = ymd(parse_date_time(date, "%Y%m"))) %>% 
+  na.omit()
+
+```
+
+Our analysis is based on a data set consisting of monthly returns of 10 industry-sorted portfolios from July 1926 to November 2020, available from Kenneth French's homepage. We assume a risk-free rate of $R_{f}=0$ and determine the monthly average return for each of the $N=10$ industry portfolios as:
+
+\begin{equation*}
+    \mu_{i}=\frac{1}{T}\sum_{t=1}^{T}r_{i,t}
+\end{equation*}
+
+where $r_{i,t}$ is the realized return at time $t$ for industry $i$ and $T=1133$ is the total number of months in the sample. This yields a $(10\times 1$ mean vector, $\mu$, of the means for the individual industry portfolios, which we take as the true parameters. 
+
+\vspace{3mm}
+
+For each industry $i$ we also calculate the standard deviation as:
+
+\begin{equation*}
+    \sigma_{i}=\sqrt{\frac{\sum_{t=1}^{T}\left(r_{i,t}-\mu_{i}\right)}{T}}
+\end{equation*}
+
+where again $r_{i,t}$ is the realized return at time $t$ for industry $i$ and $T=1133$ is the total number of months in the sample. The monthly Sharpe-ratio for each industry $i$ is then simply calculated as:
+
+\begin{equation*}
+    SR_{i}=\frac{E\left[R_{i}-R_{f}\right]}{\sigma_{i}}=\frac{E\left[R_{i}\right]}{\sigma_{i}}=\frac{\mu_{i}}{\sigma_{i}}
+\end{equation*}
+
+where it is used that the risk-free rate is assumed to be 0. 
+
+```{r Summary statistics, echo=FALSE}
+# Compute descriptive statistics of sample moments and sharpe ratio for each portfolio
+table1 <- data %>%
+  pivot_longer(-date, names_to = "ticker") %>%
+  group_by(ticker) %>%
+  summarise(mu = mean(value),
+            sd = sd(value),
+            sharpe = mu/sd) %>%
+  column_to_rownames("ticker") 
+
+# Create table of summary statistics
+knitr::kable(t(table1), caption = "Summary statistics" , digits=2)
+
+```
+
+We find that the Non-durable goods portfolio (NoDur) exhibits the highest sharpe-ratio of the 10 individual industry portfolios, which is also clear from table 1. 
+
+\vspace{3mm}
+
+We then compute the variance-covariance matrix as:
+\begin{equation*}
+   \Sigma = \frac{1}{T-1} \sum_{t=1}^{T} ((r_t-\mu)(r_t- \mu)^{\prime})  
+\end{equation*}
+
+where $r_{t}$ is a $(10\times 1)$ vector of the return vectors from the individual industry portfolio. The variance-covariance matrix, $\Sigma$ is presented below, and we will take these parameters as the true ones.
+
+```{r covariance matrix, echo=FALSE}
+# Create matrix of returns without dates
+returns <- data %>%
+  dplyr::select(-date)
+
+# Save names and count of stocks in the data
+ticker <- colnames(returns)
+N <- length(ticker)
+
+# Saves sample moments as "true" parameters
+mu_true <- returns %>% colMeans() %>% as.matrix()
+sigma_true <- cov(returns) %>% as.matrix()
+
+# Create table of variance covariance matrix
+knitr::kable(sigma_true, caption = "Covariance matrix" , digits = 2)
+```
+
+We note that all industry portfolios display positive co-variances, which is not surprising from an empirical viewpoint, as market portfolios tend to move in the same direction. 
+
+
+## Exercise 2
+```{r compute efficient frontier function, echo=FALSE}
+# Function to compute efficient frontier
+compute_efficient_frontier <- function(sigma,mu){
+  # Make iota a Nx1 vector of ones
+  iota = rep(1, ncol(sigma))
+  
+  # Compute the minimum variance portfolio weights 
+  wmvp <- solve(sigma) %*% iota 
+  wmvp <- wmvp / sum(wmvp)
+  
+  # Compute the efficient portfolio weights, with two times higher return than mvp
+  c(t(wmvp)%*%mu, sqrt(t(wmvp)%*%sigma%*%wmvp))
+  mu_bar <- 2 * t(wmvp)%*%mu 
+  C <- as.numeric(t(iota)%*%solve(sigma)%*%iota)
+  D <- as.numeric(t(iota)%*%solve(sigma)%*%mu)
+  E <- as.numeric(t(mu)%*%solve(sigma)%*%mu)
+  lambda_tilde <- as.numeric(2*(mu_bar -D/C)/(E-D^2/C))
+  weff <- wmvp + lambda_tilde/2*(solve(sigma)%*%mu - D/C*solve(sigma)%*%iota)
+  
+  # Use the two mutual funds theorem to find the efficient frontier of weighted portfolios
+  c <- seq(from = -0.1, to = 1.2, by = 0.01)
+  res <- tibble(c = c, 
+                mu = NA,
+                sd = NA)
+  # Compute possible weights of the combined portfolio and save mean and standard deviation of portfolios
+  for(i in seq_along(c)){
+    w <- (1-c[i])*wmvp + (c[i])*weff 
+    res$mu[i] <- t(w) %*% mu_true 
+    res$sd[i] <- sqrt(t(w) %*% sigma_true %*% w) 
+  }
+  
+  return(res)
+}
+
+# Save effecient frontier based on the true parameters
+results <- compute_efficient_frontier(sigma_true,mu_true)
+```
+
+We define the function "compute\_efficient\_frontier(sigma,mu)" which takes the $N \times N $ matrix $sigma$ and vector $mu$ as inputs. The inputs should be estimates of the covariance matrix $\hat{\Sigma}$ and the return vector $\hat{\mu}$ for a data set of $N$ assets. The function uses these inputs to compute the portfolio weights of the minimum variance portfolio and a efficient portfolio that delivers two times the expected return of the minimum variance portfolio. The function then uses the "true" parameters $\mu$ and $\Sigma$ and the two-mutual fund theorem to characterizes the efficient frontier. The function thereby distinguishes between the plug-in estimates $\hat{\mu}$ and $\hat{\Sigma}$ used to determine portfolio weights and the true parameters $\mu$ and $\Sigma$. 
+
+## Exercise 3
+Based on the "true" parameters $\mu$ and $\Sigma$, which in our case we assume are obtained from the historical sample moments, we use the function defined in exercise 2 to compute the theoretically optimal efficient frontier.
+
+```{r fig1, fig.cap = "Efficient frontier based on true moments",fig.width=4, fig.height=3, fig.topcaption=TRUE, echo=FALSE}
+# Visualize the efficient frontier
+ggplot(results, aes(x = sd, y = mu)) + 
+  geom_point() +                      # Plot all sd/mu portfolio combinations 
+  geom_point(data = results %>% filter(c %in% c(0,1)), 
+             color = "red",
+             size = 4) +              # locate the mvp and efficient portfolio
+  geom_point(data = tibble(mu = mu_true, sd = sqrt(diag(sigma_true))), 
+             aes(y = mu, x  = sd), color = "blue", size = 1) + 
+                                      # plot the individual assets 
+  labs(x = expression(sigma), y = expression(mu), 
+       caption = "Data source: Kenneth French") +
+  theme_bw() +
+  theme(
+        plot.caption = element_text(color = "black", face = "italic"),
+        panel.background = element_rect(fill="white", colour="grey", 
+                                  linetype="solid"),
+        panel.grid.major = element_line(size = 0.25, linetype = 'solid',
+                                  colour = "grey"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                  colour = "grey")) 
+
+```
+
+Figure 1 displays the efficient frontier based on the sample moments of the 10 industry-sorted portfolio. The red dots mark the minimum-variance portfolio and the efficient portfolio that delivers two times the expected return of the minimum variance portfolio. The return-volatility combinations for the 10 individual industry portfolios are indicated by the blue dots. We note that all the return-volatility combinations for the 10 individual industry portfolios lie within the hyperbola that constitutes the efficient frontier. This illustrates the effect of diversification. 
+
+## Exercise 4
+Next we determine the weights in the tangency portfolio given the true parameters $\mu$ and $\Sigma$ under the assumption that the risk-free rate is zero. We will denote this portfolio as the theoretically "true" tangency portfolio. 
+
+We note that the tangency portfolio has weights which can be interpreted as rather extreme. For instance the industry for non-durables has a weight on $0.75$, while the "other" portfolio has one of $-0.58$, which means that it is shorted by 58$\%$. These extreme portfolio weights for individual industries seem to contradict the principle of diversification. Overall, we conclude from the weights that the tangency portfolio does not seem to constitute a well-balanced portfolio. Further some investors might be prohibited from short-selling, which would make it impossible to implement it in reality.
+
+\vspace{3mm}
+
+We use the weights portfolio weights for the tangency portfolio to compute it's Sharpe-ratio. This "true" tangency portfolio is by definition the portfolio on the efficient frontier with the highest Sharpe-ratio. We determine the monthly Sharpe-ratio to $0.248$. However, an investor who actually implements the tangency portofolio determined from the historical sample moments, cannot be sure that his or her portfolio will yield such high Sharpe-ratio. In fact we show later in the assignment that this is almost impossible due to estimation uncertainty for the sample moments.
+
+```{r compute tangency portfolio weights, echo=FALSE}
+# Function to compute tangency portfolio weights
+compute_tangent_portfolio <- function(sigma,mu){
+  tang_w = as.numeric((solve(sigma)%*%mu)) 
+  tang_w = tang_w / sum(tang_w) 
+  return(tang_w)
+}
+
+# Tangency portfolio weights based on true parameters
+tang_w <- compute_tangent_portfolio(sigma_true,mu_true)
+
+# Function to compute sharpe ratios
+compute_sharpe_ratio <- function(weights){
+  portfolio_mean = t(weights)%*%mu_true 
+  portfolio_sd = sqrt(t(weights)%*%sigma_true%*%weights)
+  sharpe <- portfolio_mean / portfolio_sd
+  return(sharpe)
+}
+
+# Sharpe ratios based on tangency portfolio weights
+tangency_sharpe <- compute_sharpe_ratio(tang_w)
+
+# Create table of tangency portfolio weights
+tangency <- rbind(t(tang_w))
+rownames(tangency) <- c("weights")
+colnames(tangency) <- colnames(returns)
+knitr::kable(tangency, caption = "Tangency portfolio weights", digits=2)
+
+```
+
+## Exercise 5
+In the R-script we define the function "simulate\_returns(T, mu, sigma)" which returns a data set of $T=100$ simulated returns drawn from a normal distribution with the "true" moments. The seed is set to 2021. Empirics in general show that stock returns are better approximated by a student's t-distribution, which has heavier tails, meaning that it is more likely to produce values that fall far from its mean. However, for convenience a normal distribution is often used to simulate stock returns, so we follow this approach.
+
+```{r simulate returns, echo=FALSE}
+# Define function that simulate returns using the mvrnorm function
+simulate_returns <- function(T){
+  data <- mvrnorm(n = T, mu_true, sigma_true)
+  return(data)
+}
+
+```
+
+
+## Exercise 6
+In this section we start to analyze the finite-sample properties of plug-in portfolio estimates. First we use the function defined in exercise 5 to generate a single hypothetical sample of 100 observations from a normal distribution based on the historical moments. We use this sample to obtain the plug-in estimates of mean-variance efficient portfolio weights. When then evaluate the performance using the true moments $\mu$ and $\Sigma$. This allows us to get a sense of the loss associated with use sample moments when determining optimal portfolio allocation. 
+
+```{r fig2, fig.cap = "Simulated Efficient Frontier",fig.width=4, fig.height=3, echo=FALSE}
+# Function to simulate efficient frontiers for plug-in estimates
+simulate_efficient_frontiers <- function(T_sim){
+  empty_returns <- simulate_returns(T_sim) %>% as.matrix()
+  sim_mu = empty_returns %>% colMeans() %>% as.matrix()
+  sim_sigma = cov(empty_returns) %>% as.matrix()
+  sim_res <- compute_efficient_frontier(sim_sigma,sim_mu)
+}
+
+# Simulate efficient frontier once for 100 observations
+empty_returns <- returns[FALSE,]
+results_sim100 <- simulate_efficient_frontiers(100)
+
+# Compare simulated efficient frontier with true efficient frontier
+ggplot() + 
+  geom_point(data=results_sim100, aes(x=sd, y=mu), color="green") + 
+  geom_point(data=results, aes(x=sd, y=mu)) +
+  geom_point(data = results %>% filter(c %in% c(0,1)), aes(x=sd, y=mu), 
+             color = "red",
+             size = 4) +
+  labs(x = expression(sigma), y = expression(mu), 
+       caption = "Data source: Kenneth French") +
+  theme_bw() +
+  theme(
+        plot.caption = element_text(color = "black", face = "italic"),
+        panel.background = element_rect(fill="white", colour="grey", 
+                                        linetype="solid"),
+        panel.grid.major = element_line(size = 0.25, linetype = 'solid',
+                                        colour = "grey"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                        colour = "grey"))
+
+```
+We note from figure 2 that the single estimated efficient frontier is below the theoretical optimal one, which means that portfolios along the new efficient frontier has a lower expected return for a given level of volatility. This illustrates that there is a loss associated with using plug-in estimates based on sample moments due to estimation uncertainty. However, we need to do further simulations in order to assess the magnitude of the estimation error.
+
+
+## Exercise 7
+In the last exercise we only did one hypothetical return simulation. Now we instead do 250 simulations with a sample size of 100 in order to quantify the estimation error. From these 250 samples we calculate the plug-in estimates of the mean-variance frontier evaluated at the true moments. These are plotted below along with the theoretically "true" efficient frontier.
+```{r fig3, fig.cap = "Simulated efficient frontier, 100 observations",fig.width=4, fig.height=3, echo=FALSE}
+
+# Replication of simulated efficient frontier 250 times and 100 observations
+empty_returns <- returns[FALSE,]
+simulation_t100 <- replicate(250,simulate_efficient_frontiers(100)) 
+simulation_t100 <- as.data.frame(simulation_t100)
+simulation_t100 <- do.call(rbind, lapply(simulation_t100, data.frame)) 
+
+# Plot of simulated efficient frontiers with T=100
+ggplot(data=simulation_t100, aes(x = sd, y = mu)) +
+  geom_point(size = 0.0005, alpha=0.1) +
+  geom_point(data=results, aes(x=sd, y=mu), color = "red", size = 1) + 
+  labs(x = expression(sigma), y = expression(mu), 
+       caption = "Data source: Kenneth French") +
+  theme_bw() +
+  theme(
+      plot.caption = element_text(color = "black", face = "italic"),
+      panel.background = element_rect(fill="white", colour="grey", 
+                                      linetype="solid"),
+      panel.grid.major = element_line(size = 0.25, linetype = 'solid',
+                                      colour = "grey"), 
+      panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                      colour = "grey"),
+      legend.position = "none")
+
+```
+As shown in figure 3 the estimated efficient frontiers have a quite volatile structure. This is an indication of a general problem in relation to precisely estimating the mean-variance trade off. As noted in Jobson and Korkie (1980) the efficient frontier obtained from the plug-in estimates will almost always be different from the true optimal portfolio weights in finite samples due to estimation errors. Our results are therefore perfectly in line with this finding.
+
+\vspace{3mm}
+
+In order to analyze the effect of the sample size we also compute another 250 plug-in estimates of efficient frontiers, where we instead simulate stock returns with a sample size on 250. 
+```{r fig4, fig.cap = "Simulated efficient frontier, 250 observations",fig.width=4, fig.height=3, echo=FALSE}
+# Replication of simulated efficient frontiers 250 times and 250 observations
+empty_returns <- returns[FALSE,]
+simulation_t250 <- replicate(250,simulate_efficient_frontiers(250)) 
+simulation_t250 <- as.data.frame(simulation_t250)
+simulation_t250 <- do.call(rbind, lapply(simulation_t250, data.frame)) 
+
+# Plot of simulated efficient frontiers with T=250
+ggplot(data=simulation_t250, aes(x = sd, y = mu)) +
+  geom_point(size = 0.0005, alpha=0.1) +
+  geom_point(data=results, aes(x=sd, y=mu), color = "red", size = 1) + 
+  labs(x = expression(sigma), y = expression(mu), 
+       caption = "Data source: Kenneth French") +
+  theme_bw() +     
+  theme(
+        plot.caption = element_text(color = "black", face = "italic"),
+        panel.background = element_rect(fill="white", colour="grey", 
+                                        linetype="solid"),
+        panel.grid.major = element_line(size = 0.25, linetype = 'solid',
+                                        colour = "grey"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                        colour = "grey"),
+        legend.position = "none")
+
+```
+From this plot is is clear that the cluster of simulated efficient frontiers are closer and more aligned with the theoretical efficient frontier. This indicates that the problem with estimation error disappears asymptotically, whereby it is only present in finite samples. This is simply due to the fact that we can estimate the sample moments more precisely, when we have more observations.
+
+## Exercise 8
+```{r compute simulated sharpe ratios, echo=FALSE}
+# Function to compute simulated sharpe ratios
+simulate_sharpe <- function(T_sim){
+  empty_returns <- simulate_returns(T_sim) %>% as.matrix()
+  sim_mu = empty_returns %>% colMeans() %>% as.matrix()
+  sim_sigma = cov(empty_returns) %>% as.matrix()
+  
+  sim_tang_w <- compute_tangent_portfolio(sim_sigma,sim_mu)
+  sim_sharpe <- compute_sharpe_ratio(sim_tang_w)
+  return(sim_sharpe)
+}
+
+```
+## Exercise 9
+```{r fig5, fig.cap = "Histogram of simulated sharpe ratios with T=100",fig.width=4, fig.height=3, echo=FALSE}
+# Replication of simulation 250 times T=100 computing sharpe ratios
+empty_returns <- returns[FALSE,]
+sim_t100_sharpe <- replicate(250,simulate_sharpe(100)) 
+sim_t100_sharpe <- as.data.frame(sim_t100_sharpe)
+sim_t100_sharpe <- do.call(rbind, lapply(sim_t100_sharpe, data.frame)) 
+colnames(sim_t100_sharpe) <- c("sharpe")
+
+# Plot histogram of simulated sharpe ratios with T=100
+ggplot(data=sim_t100_sharpe, aes(x=sharpe)) +
+  geom_histogram(bins=15, col=I("red"), alpha=I(.5)) + 
+  labs(y = "count", x = "Sharpe ratio", 
+       caption = "Data source: Kenneth French") +
+  geom_vline(aes(xintercept = tangency_sharpe),
+             color = "red", 
+             linetype = "dashed") +
+  theme(
+        plot.caption = element_text(color = "black", face = "italic"),
+        panel.background = element_rect(fill="white", colour="grey", 
+                                        linetype="solid"),
+        panel.grid.major = element_line(size = 0.25, linetype = 'solid',
+                                        colour = "grey"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                        colour = "grey"))
+
+
+
+```
+
+```{r fig6, fig.cap = "Histogram of simulated sharpe ratios with T=250",fig.width=4, fig.height=3, echo=FALSE}
+
+knitr::opts_chunk$set(fig.pos = "!H", out.extra = "")
+
+# Replication of simulation 250 times T=250 computing sharpe ratios
+empty_returns <- returns[FALSE,]
+sim_t250_sharpe <- replicate(250,simulate_sharpe(250)) 
+sim_t250_sharpe <- as.data.frame(sim_t250_sharpe)
+sim_t250_sharpe <- do.call(rbind, lapply(sim_t250_sharpe, data.frame)) 
+colnames(sim_t250_sharpe) <- c("sharpe")
+
+# Plot histogram of simulated sharpe ratios with T=250
+ggplot(data=sim_t250_sharpe, aes(x=sharpe)) +
+  geom_histogram(bins=15, col=I("red"), alpha=I(.5)) + 
+  labs(y = "count", x = "Sharpe ratio", 
+       caption = "Data source: Kenneth French") +
+  geom_vline(aes(xintercept = tangency_sharpe),
+             color = "red", 
+             linetype = "dashed") +
+  theme(
+        plot.caption = element_text(color = "black", face = "italic"),
+        panel.background = element_rect(fill="white", colour="grey", 
+                                        linetype="solid"),
+        panel.grid.major = element_line(size = 0.25, linetype = 'solid',
+                                        colour = "grey"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                        colour = "grey"))
+
+```
+
+
+```{r alternatie strategies, echo=FALSE}
+# Comparison of portfolios and alternative strategies for portfolios
+
+# Set weights for the naive portfolio
+w_naive <- rep(1/N,N) 
+
+# Compute sharpe ratio of naive portfolio allocation
+sharpe_naive <- compute_sharpe_ratio(w_naive)
+
+# Function - computes minimum variance portfolio weights with short sell constraint
+optimal_constrained_mvp_weights <- function(sigma){
+  w_opt <- solve.QP(Dmat = sigma,
+                    dvec = rep(0, N), 
+                    Amat = cbind(1, diag(N)), 
+                    bvec = c(1, rep(0, N)), 
+                    meq = 1)
+  
+  return(w_opt$solution)
+}
+
+# Function to compute sharpe ratio with short-selling constraint
+#empty_returns <- returns[FALSE,]
+simulate_sharpe_cons <- function(T_sim){
+  empty_returns <- simulate_returns(T_sim) %>% as.matrix()
+  sim_mu = empty_returns %>% colMeans() %>% as.matrix()
+  sim_sigma = cov(empty_returns) %>% as.matrix()
+  
+  sim_tang_w <- optimal_constrained_mvp_weights(sim_sigma)
+  sim_sharpe <- compute_sharpe_ratio(sim_tang_w)
+  return(sim_sharpe)
+}
+
+# Simulation of sharpe ratios with short-selling constraint and T=100
+empty_returns <- returns[FALSE,]
+sim_t100_sharpe_cons <- replicate(250,simulate_sharpe_cons(100)) 
+sim_t100_sharpe_cons <- as.data.frame(sim_t100_sharpe_cons)
+sim_t100_sharpe_cons <- do.call(rbind, lapply(sim_t100_sharpe_cons, data.frame)) 
+colnames(sim_t100_sharpe_cons) <- c("sharpe")
+
+# Simulation of sharpe ratios with short-selling constraint and T=250
+empty_returns <- returns[FALSE,]
+sim_t250_sharpe_cons <- replicate(250,simulate_sharpe_cons(250)) 
+sim_t250_sharpe_cons <- as.data.frame(sim_t250_sharpe_cons)
+sim_t250_sharpe_cons <- do.call(rbind, lapply(sim_t250_sharpe_cons, data.frame)) 
+colnames(sim_t250_sharpe_cons) <- c("sharpe")
+
+# Make table of all sharpe ratios
+sharpe_table <- matrix(c(mean(sim_t100_sharpe[["sharpe"]]),
+                         mean(sim_t250_sharpe[["sharpe"]]),
+                         sharpe_naive, sharpe_naive,
+                         mean(sim_t100_sharpe_cons[["sharpe"]]),
+                         mean(sim_t250_sharpe_cons[["sharpe"]]),
+                         tangency_sharpe, tangency_sharpe),
+                       ncol = 2, byrow = TRUE)
+colnames(sharpe_table) <- c("T=100","T=250")
+rownames(sharpe_table) <- c("Unconstrained", "Naive","Constrained", "True")
+
+knitr::kable(t(sharpe_table),caption = "Sharpe Ratios for Different strategies", digits=2)
+
+```
