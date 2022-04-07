@@ -1,0 +1,658 @@
+---
+title: "MA3 - Advanced Empirical Finance"
+date: "7 June 2021"
+header-includes:
+  \usepackage[utf8]{inputenc}
+  \usepackage[T1]{fontenc}
+  \usepackage{floatrow}
+  \floatsetup[figure]{capposition=top}
+  \floatsetup[table]{capposition=top}
+  \floatplacement{figure}{H}
+  \floatplacement{table}{H}
+geometry: margin=1.9cm
+fontsize: 12pt
+line-height: 1.5
+output: pdf_document
+toc: yes
+toc_depth: 3
+classoption: a4paper
+
+---
+\newpage
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = FALSE)
+
+# Load packages
+library(tidyverse) 
+library(tidyquant)
+library(gridExtra)
+library(alabama)   
+library(quadprog)
+library(knitr)
+library(kableExtra)
+
+# Load data
+load("data_mandatory_assignment_3.RData") # For part 1 
+
+
+``` 
+
+```{r Define variables}
+# Define variables
+returns_mat <- as.matrix(returns %>% select(-date)) / 100
+ticker <- colnames(returns_mat)
+N <- length(ticker)
+number_of_iterations = 10000 # number of iterations for exercise 2
+beta = 1 # beta value for exercise 2
+gamma = 4
+
+```
+
+## Introduction 
+Large-scale portfolio optimization has long been a field of interest. A large part of the literature focus on different ways of coping with the challenges due to noise in parameter estimates, model uncertainty and time variations. Further the presence of market imperfections and the illiquidity of certain assets in financial markets means that assets do not trade at their fundamental value but are subject to spreads and other transaction costs. These transaction costs mean that rebalancing portfolios is costly and therefore theoretical strategies, which only account for these ex post, may be sub-optimal when accounting for transaction costs.  
+
+Based on the findings in Hautsch et. al. (2019) we show how incorporating transaction cost changes the optimal portfolio by performing back-testing strategies on a sample of 40 stocks. We specifically focus on illustrating and testing the finding of Hautsch et al (2019) that
+
+\textit{"...quadratic transaction costs can be interpreted as shrinkage of the variance-covariance matrix towards a diagonal matrix and a shift of the mean that is proportional to transaction costs and current holdings. Transaction costs proportional to the amount of rebalancing imply a regularization of the covariance matrix, acting similarly as the least absolute shrinkage and selection operator (Lasso) by Tibshirani (1996) in a regression problem and imply to put more weight on a buy-and-hold strategy."} 
+
+We start by deriving the closed form solution to the portfolio choice certainty equivalent maximization problem adjusted for asset specific quadratic transaction costs. Using the derived solution we then illustrate the convergence towards the mean-variance efficient portfolio and how the convergence is affected by illiquidity. When measuring the illiquidity of the assets we use the Amihud (2002) measure, which uses the effect of trading volume on the magnitude of the returns to calculate the illiquidity of a stock. The amihud measure may not be the most accurate however it has the advantage that it is only calculated based on data of daily return and volume as opposed to other measures based on intraday data. 
+
+Next we investigate the effect of different transaction costs parameters on the out-of-sample performance 
+
+Finally we perform a backtesting of three different portfolio optimization strategies assuming proportional $L_1$ transaction costs. We compare the out-sample-performance of a naive portfolio, a theoretical portfolio that is optimally adjusted for the transaction costs ex-ante and a minimum variance portfolio with short sell constraint as suggested by Jagannathan and Ma (2003). 
+
+## Exercise 1
+We consider the portfolio maximization problem given by 
+$$
+\omega_{t+1}^{*} =\arg\max_{\omega_{t+1}\in\mathbb{R}^{N},\iota^{\prime}\omega_{t+1}=1}\omega_{t+1}^{\prime}\mu-\nu_{t}\left(\omega_{t+1},\beta\right)-\frac{\gamma}{2}\omega_{t+1}^{\prime}\Sigma\omega_{t+1}
+$$
+where $\mu$ is the estimator of returns, $\Sigma$ is the estimator of the variance-covariance matrix and $\gamma$ is the risk aversion parameter. The transaction costs are assumed to be quadratic in rebalancing and proportional to the stock illiquidity. 
+$$
+   \nu_{t}\left(\omega_{t+1},\beta\right)=\frac{\beta}{2}\left(\omega_{t+1}-\omega_{t+}\right)^{\prime}B\left(\omega_{t+1}-\omega_{t+}\right)
+$$
+The quadratic transaction costs function includes the amihud measure as a measure of illiquidity of the assets expressed as the vector $B$. As Hautsch et. al. (2019), shows the inclusion of transaction costs regularizes the covariance matrix in a similar way to Lasso and Ridge penalization of turnover. This improves portfolio allocation as the regularization effects improves stability of the covariance estimates and reduce the frequency of rebalancing implying a reduction in turnover costs. In addition the transaction cost are proportional to the illiquidity measure, and hence we would expect transaction costs to be larger, the less liquid the given asset is.
+
+We plug it into the maximization problem and rearrange terms:
+$$
+\begin{aligned}
+\omega_{t+1}^{*} &=\arg\max_{\omega_{t+1}\in\mathbb{R}^{N},\iota^{\prime}\omega_{t+1}=1}\omega_{t+1}^{\prime}\mu-\frac{\beta}{2}\left(\omega_{t+1}-\omega_{t+}\right)^{\prime}B\left(\omega_{t+1}-\omega_{t+}\right)-\frac{\gamma}{2}\omega_{t+1}^{\prime}\Sigma\omega_{t+1} \\
+& =\arg\max_{\omega_{t+1}\in\mathbb{R}^{N},\iota^{\prime}\omega_{t+1}=1}\omega_{t+1}^{\prime}\mu-\frac{\beta}{2}\omega_{t+1}^{\prime}B\omega_{t+1}+\beta\omega_{t+1}B\omega_{t+}-\frac{\beta}{2}\omega_{t+}B\omega_{t+}-\frac{\gamma}{2}\omega_{t+1}^{\prime}\Sigma\omega_{t+1} \\
+& =\arg\max_{\omega_{t+1}\in\mathbb{R}^{N},\iota^{\prime}\omega_{t+1}=1}\omega_{t+1}^{\prime}\left(\mu-\beta B \omega_{t+}\right)-\frac{\gamma}{2}\omega_{t+1}^{\prime}\left(\Sigma+\frac{\beta}{\gamma}B\right)\omega_{t+1} \\
+	& =\arg\max_{\omega_{t+1}\in\mathbb{R}^{N},\iota^{\prime}\omega_{t+1}=1}\omega_{t+1}^{\prime}\mu^{*}_B-\frac{\gamma}{2}\omega_{t+1}^{\prime}\Sigma^{*}_B\omega_{t+1}  
+\end{aligned}
+$$
+where $\mu^{*}_B=\mu-\beta B\omega_{t+}$ and $\text{\ensuremath{\Sigma^{*}_B=}}\Sigma+\frac{\beta}{\gamma}B$. From the rearrangement of terms it follows that the maximization problem with incoorporated ex-ante transaction costs boils down to the Markowitz mean-variance problem without transaction costs, if we adjust the expressions for $\mu$ and $\Sigma$. We find the optimal portfolio weights be expressing and solving the Lagrangian for the maximization problem:
+\begin{gather*}
+    \mathcal{L}(\omega_{t+1}) = \omega_{t+1}^{\prime}\mu^{*}_B-\frac{\gamma}{2}\omega_{t+1}^{\prime}\Sigma^{*}_B\omega_{t+1} - \lambda (\iota^{\prime} \omega_{t+1} - 1) \\
+ \begin{aligned}
+    \frac{\partial\mathcal{L} (\omega_{t+1})}{\partial \omega_{t+1}} &= \mu^{*}_{B} - \gamma \Sigma^{*}_{B} \omega_{t+1} - \lambda \iota = 0 &&\Leftrightarrow \omega_{t+1} = \frac{1}{\gamma}\Sigma^{*-1}_{B} (\mu^{*}_B - \lambda \iota) \\
+    \frac{\partial\mathcal{L} (\omega_{t+1})}{\partial \lambda} &= \iota^{\prime} \omega_{t+1} - 1 = 0 &&\Leftrightarrow \iota^{\prime} \omega_{t+1} = 1 
+    \end{aligned}
+\end{gather*}
+Combining the FOC's yields the following expression for $\lambda$ which can be reinserted into the first FOC and rearranged in order to find the optimal portfolio weights:
+$$
+\begin{aligned}
+    1 &= \frac{1}{\gamma} (\iota^{\prime}\Sigma^{*-1}_{B}\mu^{*}_B - \lambda \iota^{\prime}\Sigma^{*-1}_{B} \iota) \\
+    \lambda &= \frac{1}{\iota^{\prime} \Sigma^{*-1}_{B} \iota} (\iota^{\prime} \Sigma^{*-1}_{B} \mu^{*}_{B} - \gamma) \\
+    \omega_{t+1} &= \frac{1}{\gamma}\Sigma^{*-1}_{B} (\mu^{*}_B - \left( \frac{1}{\iota^{\prime} \Sigma^{*-1}_{B} \iota} (\iota^{\prime} \Sigma^{*-1}_{B} \mu^{*}_{B} - \gamma) \iota \right)  \\
+    \omega_{t+1} &= \frac{\Sigma^{*-1}_{B} \iota }{\iota^{\prime}\Sigma^{*-1}_{B} \iota} +  \frac{1}{\gamma}  \Sigma^{*-1}_{B}\iota \left( \mu^{*}_B - \frac{1}{\iota^{\prime} \Sigma^{*-1}_{B} \iota} \iota^{\prime} \Sigma^{*-1}_{B} \mu^{*}_{B} \right)  \\
+    \omega_{t+1}^{*} &= \frac{1}{\gamma}\left(\Sigma^{*-1}_B-\frac{1}{\iota^{\prime}\Sigma^{*-1}_B\iota}\Sigma^{*-1}_B\iota\iota^{\prime}\Sigma^{*-1}_B\right)\mu^{*}_B+\frac{1}{\iota^{\prime}\Sigma^{*-1}_B\iota}\Sigma^{*-1}_B\iota
+\end{aligned}
+$$
+Illiquidity of the assets is in general interpreted as the extra cost or risk of capital tied up in less liqiud assets as these in general are harder to liquidate in case of a price drop on the asset. Therefore the measure of illiquidity can be interpreted as a risk premium and the more illiquid an asset is the higher the transaction costs will be. If comparing weights to a myopic investor disregarding transaction cost the weight on an asset with a higher illiquidity measure (low liquidity of the given asset) will be higher for a investor who takes transaction costs into account if we consider a price drop of the asset. This is due to the fact that is becomes more expensive to rebalance portfolio weights the less liquid and in turn higher transaction cost are for the given asset.
+```{r Defining function for optimal weights}
+optimal_tc_weight <- function(w_prev, 
+                              mu, 
+                              Sigma,
+                              B,
+                              beta = 0, 
+                              gamma = 4){
+  # Computation of the regularized mu and Sigma
+  N <- ncol(Sigma)
+  iota <- rep(1, N)
+  Sigma_proc <- Sigma + as.numeric(beta) / as.numeric(gamma) * as.matrix(B)
+  mu_proc <- mu + beta * diag(B * w_prev)
+  
+  # Find inverse of Sigma
+  Sigma_inv <- solve(Sigma_proc)
+  
+  # Computes optimal weights considering transaction costs
+  w_mvp <- Sigma_inv %*% iota
+  w_mvp <- w_mvp / sum(w_mvp)
+  w_opt <- w_mvp + 1 / gamma * (Sigma_inv - w_mvp %*% t(iota) %*% Sigma_inv) %*% mu_proc
+  return(w_opt)
+}
+```
+## Exercise 2
+As in Hautsch et al (2019), if we denote the initial wealth allocation as $\omega_0$, we are able to study the long run effect, by examining the sequential rebalancing:
+$$
+\begin{aligned}
+  \omega_{T} = \sum_{i=0}^{T-1} \left( \frac{\beta}{\gamma} A(\Sigma_{B}^{*}) \right)^{i}\omega(\mu,\Sigma_B^*) + \left( \frac{\beta}{\gamma} A(\Sigma_{B}^{*}) \right)^{T}\omega_0
+\end{aligned}
+$$
+where $A(\Sigma_B^*) = \left(\Sigma^{*-1}_B-\frac{1}{\iota^{\prime}\Sigma^{*-1}_B\iota}\Sigma^{*-1}_B\iota\iota^{\prime}\Sigma^{*-1}_B\right)$. The equation shows that $\omega_T$ can be interpreted as weighted average of the mean variance efficient portfolio weights and the initial allocation. Proposition 2 of Hautsch et al (2019) states that for infinitely large transaction costs the long run weights will be equal to the iniital allocation. However proposition 3 states that there exist a range for $\beta$ below a certain threshold $\beta^*$ where the initial allocation can be ignored in the long run. Using $T\rightarrow \infty$ and $\beta < \beta^*$ the series of sequential rebalancing converges to a unique fix point given by the weights computed with no regard to the transaction costs as finally stated in Proposition 4 of hautsch et al (2019).
+$$
+\begin{aligned}
+  \omega_{\infty} = \left( I - \frac{\beta}{\gamma} \Sigma^*_B \right)^{-1} \omega(\mu,\Sigma^*_B) = \omega(\mu,\Sigma)
+\end{aligned}
+$$
+As stated in the article this shows that for large transaction costs above the threshold, the investor will not reallocate to the efficient portfolio. However if the transaction costs are moderate we can obtain convergence towards the efficient portfolio of a setup where transaction costs are ignored. 
+
+In this exercise we show the convergence of the portfolio towards the efficient frontier as derived in proposition 4 when $T\rightarrow \infty$. The weights are computed using the function defined in exercise 1, and are computed using a loop over `r number_of_iterations` values. $\mu$ is computed as the mean of each stock return using the full sample while $\Sigma$ is computed with the Ledoit-Wolf shrinkage covariance estimator. We use the Ledoit-Wolf covariance estimator to estimate the covariance among the assets as proposed by Ledoit and Wolf (2003). As stated by Ledoit and Wolf (2003) the sample covariance matrix is unbiased but unfortunately often associated with a lot of estimation error when the number of observation is comparable of smaller than the number of individual stocks. In our case we have 40 assets and 500 observations. However we would argue that estimation error may still be present and follow the advice of Ledoit and Wolf (2003) and avoid using the sample covariance matrix.
+```{r Defining function for Sigma by Ledoit-Wolf}
+compute_ledoit_wolf <- function(x) {
+  # Computes Ledoit-Wolf shrinkage covariance estimator
+  # This function generates the Ledoit-Wolf covariance estimator as proposed in Ledoit, Wolf 2004 (Honey, I shrunk the sample covariance matrix.)
+  # X is a (t x n) matrix of returns
+  t <- nrow(x)
+  n <- ncol(x)
+  x <- apply(x, 2, function(x) if (is.numeric(x)) # demean x
+    x - mean(x) else x)
+  sample <- (1/t) * (t(x) %*% x)
+  var <- diag(sample)
+  sqrtvar <- sqrt(var)
+  rBar <- (sum(sum(sample/(sqrtvar %*% t(sqrtvar)))) - n)/(n * (n - 1))
+  prior <- rBar * sqrtvar %*% t(sqrtvar)
+  diag(prior) <- var
+  y <- x^2
+  phiMat <- t(y) %*% y/t - 2 * (t(x) %*% x) * sample/t + sample^2
+  phi <- sum(phiMat)
+  
+  repmat = function(X, m, n) {
+    X <- as.matrix(X)
+    mx = dim(X)[1]
+    nx = dim(X)[2]
+    matrix(t(matrix(X, mx, nx * n)), mx * m, nx * n, byrow = T)
+  }
+  
+  term1 <- (t(x^3) %*% x)/t
+  help <- t(x) %*% x/t
+  helpDiag <- diag(help)
+  term2 <- repmat(helpDiag, 1, n) * sample
+  term3 <- help * repmat(var, 1, n)
+  term4 <- repmat(var, 1, n) * sample
+  thetaMat <- term1 - term2 - term3 + term4
+  diag(thetaMat) <- 0
+  rho <- sum(diag(phiMat)) + rBar * sum(sum(((1/sqrtvar) %*% t(sqrtvar)) * thetaMat))
+  
+  gamma <- sum(diag(t(sample - prior) %*% (sample - prior)))
+  kappa <- (phi - rho)/gamma
+  shrinkage <- max(0, min(1, kappa/t))
+  if (is.nan(shrinkage))
+    shrinkage <- 1
+  sigma <- shrinkage * prior + (1 - shrinkage) * sample
+  return(sigma)
+}
+```
+```{r inital matrices for exercise 2}
+# Mean and covariance estimate  
+mu_zero <- 0 * colMeans(returns_mat) %>% as.matrix()
+mu_ex2 <- colMeans(returns_mat) %>% as.matrix() 
+Sigma <- compute_ledoit_wolf(returns_mat)
+
+# Initial naive portfolio 
+w_0 <- rep(1/N,N)
+
+# Illiquidity measure as diagonal matrix
+B <- diag(amihud_measures[["illiquidity"]]) %>% as.matrix()
+
+# Initialize matrices to collect iterated weights and portfolio returns and variance
+iterated_weights <- matrix(NA, nrow = number_of_iterations, ncol =  41)
+iterated_portfolios <- matrix(NA, nrow = number_of_iterations, ncol = 2) 
+
+# Set first iteration of weights to the naive portfolio
+iterated_weights[1,1:40] = t(w_0)
+
+# Change column names of the initialized matrices
+colnames(iterated_weights) <- c(ticker, "iteration")
+colnames(iterated_portfolios) <- c("mu", "sd")
+
+# Loop over weights to find convergence of portfolio weights as T increases
+for(i in 1:(number_of_iterations-1)){
+  row = i + 1
+  w_prev = i
+  iterated_weights[row,1:40] <- 
+    t(optimal_tc_weight(iterated_weights[w_prev,1:40], mu_ex2, Sigma, B, beta = beta, gamma = gamma))
+}
+
+# Loops over weights to compute portfolio returns and std. dev.
+for(i in 1:number_of_iterations){
+  iterated_portfolios[i,1] = sum(mu_ex2 * iterated_weights[i,1:40])
+  iterated_portfolios[i,2] = sqrt(t(iterated_weights[i,1:40]) %*% Sigma %*% iterated_weights[i,1:40]) 
+}
+
+# Add column showing number of iteration and change to tibble
+iterated_weights[1:number_of_iterations,41] = seq(1,number_of_iterations, by=1)
+iterated_weights <- as_tibble(iterated_weights)
+
+# Extraction of quartiles of Amihud measure
+amihud_measures <- amihud_measures %>% mutate(quartile = ntile(illiquidity, 4))
+quartiles = amihud_measures[1:40,3]
+
+# Replication of quartiles
+rep_quartiles <- do.call("rbind", replicate(number_of_iterations, quartiles, simplify = FALSE))
+
+# Pivot of data in order to make plot
+iterated_weights_long <- pivot_longer(
+  iterated_weights,
+  all_of(ticker),
+  names_to = "ticker") 
+
+# Add column with quartiles of amihud measure to tibble of iterated weights
+ex2_data <- cbind(iterated_weights_long,rep_quartiles)
+```
+```{r computation of efficient frontier}
+# Function to compute efficient frontier
+compute_efficient_frontier <- function(sigma,mu,gamma=4){
+  # Make iota a Nx1 vector of ones
+  iota = rep(1, ncol(sigma))
+  
+  # Compute the minimum variance portfolio weights 
+  w_mvp <- solve(sigma) %*% iota 
+  w_mvp <- w_mvp / sum(w_mvp)
+  
+  # Compute efficient portfolio weights given risk aversion of 4
+  w_eff <- w_mvp  + 1/gamma * (solve(sigma) - w_mvp %*% t(iota) %*% solve(sigma)) %*% mu
+  
+  # Use the two mutual fund theorem to find the efficient frontier of weighted 
+  # portfolios
+  c <- seq(from = -0.1, to = 1.2, by = 0.01)
+  res <- tibble(c = c, 
+                mu = NA,
+                sd = NA)
+  # Compute possible weights of the combined portfolio and save mean and 
+  # standard deviation of portfolios
+  for(i in seq_along(c)){
+    w <- (1-c[i])*w_mvp + (c[i])*w_eff 
+    res$mu[i] <- t(w) %*% mu 
+    res$sd[i] <- sqrt(t(w) %*% sigma %*% w) 
+  }
+  
+  return(res)
+}
+
+# Save efficient frontier computed from the function
+results <- compute_efficient_frontier(Sigma,mu_ex2,gamma) 
+```
+Below the convergence towards the efficient frontier is shown. The figure shows the convergence starting from the naive portfolio towards the theoretically efficient portfolio. The reallocation is notably larger in initial iterations, and the adjusting of portfolio weights decrease in speed as we loop through the iterations. 
+
+```{r fig1, fig.cap = "Convergence towards efficient portfolio",fig.width=4.5, fig.height=2.7}
+# Construct and show plot of efficient frontier and convergence of iterated portfolios
+ggplot(results, aes(x = sd, y = mu)) + 
+  geom_point() +                      # Plot all sd/mu portfolio combinations 
+  geom_point(data = results %>% filter(c %in% c(0,1)), 
+             color = "red",
+             size = 4)  +   # locate the mvp and efficient portfolio
+  geom_point(data = tibble(mu = iterated_portfolios[1:number_of_iterations,1], sd = iterated_portfolios[1:number_of_iterations,2]), 
+             aes(y = mu, x  = sd), color = "blue", size = 1) + 
+  labs(x = expression(sigma), y = expression(mu)) +
+  theme_bw() +
+  theme(
+        plot.caption = element_text(color = "black", face = "italic"),
+        panel.background = element_rect(fill="white", colour="grey", 
+                                        linetype="solid"),
+        panel.grid.major = element_line(size = 0.25, linetype = 'solid',
+                                        colour = "grey"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                        colour = "grey"))
+
+```
+
+In order to illustrate the weight dynamics towards the efficient portfolio we divide the stocks into quartiles based on the measure of illiquidity. This enables os to show the difference in convergence speed towards the efficient portfolio weights for the different groups of assets. The first quartile $(Q1)$ are the most liquid assets, while the last quartile $(Q4)$ are the assets with the highest illiquidity measure, hence the least liquid assets. The x-axis follows logarithmic scale for a better overview of the difference in convergence speeds.
+
+```{r Construction of quartile plots showing weight dynamics}
+# Subsetting data bases on quartiles of amihud measure
+g1 <- subset(ex2_data, quartile==1 )
+g2 <- subset(ex2_data, quartile==2 )
+g3 <- subset(ex2_data, quartile==3 )
+g4 <- subset(ex2_data, quartile==4 )
+
+# Create plot for each subset of data
+g1 <- ggplot(g1, aes(x = iteration, y = value, colour=ticker, )) + 
+  geom_line(show.legend = FALSE) +
+  labs(x = "Number of iterations", 
+       y = "Q1") +
+  scale_x_log10(labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  theme_bw() + 
+  theme(plot.caption = element_text(color = "black", face = "italic"),
+        panel.background = element_rect(fill="white", colour="grey", 
+                                  linetype="solid"),
+        panel.grid.major = element_line(size = 0.25, linetype = 'solid',
+                                  colour = "grey"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                  colour = "grey"))
+
+g2 <-ggplot(g2, aes(x = iteration, y = value, colour=ticker, )) + 
+  geom_line(show.legend = FALSE) +
+  labs(x = "Number of iterations", 
+       y = "Q2") +
+  scale_x_log10(labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  theme_bw() + 
+  theme(plot.caption = element_text(color = "black", face = "italic"),
+        panel.background = element_rect(fill="white", colour="grey", 
+                                  linetype="solid"),
+        panel.grid.major = element_line(size = 0.25, linetype = 'solid',
+                                  colour = "grey"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                  colour = "grey"))
+
+g3 <-ggplot(g3, aes(x = iteration, y = value, colour=ticker, )) + 
+  geom_line(show.legend = FALSE) +
+  labs(x = "Number of iterations", 
+       y = "Q3") +
+  scale_x_log10(labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  theme_bw() + 
+  theme(plot.caption = element_text(color = "black", face = "italic"),
+        panel.background = element_rect(fill="white", colour="grey", 
+                                  linetype="solid"),
+        panel.grid.major = element_line(size = 0.25, linetype = 'solid',
+                                  colour = "grey"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                  colour = "grey"))
+
+g4 <- ggplot(g4, aes(x = iteration, y = value, colour=ticker, )) + 
+  geom_line(show.legend = FALSE) +
+  labs(x = "Number of iterations", 
+       y = "Q4") +
+  scale_x_log10(labels = scales::trans_format("log10", scales::math_format(10^.x))) +
+  theme_bw() + 
+  theme(plot.caption = element_text(color = "black", face = "italic"),
+        panel.background = element_rect(fill="white", colour="grey", 
+                                  linetype="solid"),
+        panel.grid.major = element_line(size = 0.25, linetype = 'solid',
+                                  colour = "grey"), 
+        panel.grid.minor = element_line(size = 0.25, linetype = 'solid',
+                                  colour = "grey"))
+  
+```
+```{r fig2, fig.cap = "Effect of illiquidity measure on weight dynamics",fig.width=4.5, fig.height=4.5, fig.topcaption=TRUE,  echo=FALSE}
+# Plot of the convergence in portfolio weights for each group
+grid.arrange(g1, g2, g3, g4, ncol=2)
+```
+
+The plot shows are clear trend of decreasing speed in convergence towards the efficient weights as the illiquidity measure rises. The most liquid assets of the first quartile $Q1$ seem to reach the efficient weights almost immediately, while the less liquid the assets are the slower the convergence is as seen from the latter quartiles.
+
+## Exercise 3
+
+In this exercise we illustrate the effect of different values of the transaction cost parameter $\beta$ on the annualized out-of-sample Sharpe-ratio. We consider values of $\beta$ between 0 and 100. However, when we evaluate the performance of the portfolio, this is done using a transaction cost parameter equal to the actual transaction cost. The true transaction cost parameter is assumed to be $\beta_{true}=1$. 
+
+We consider two ways of estimating the variance-covariance matrix, $\hat{\Sigma}$, which is the sample covariance estimator and the shrinkage estimator proposed by Ledoit and Wolf (2003). However, we do not estimate the mean vector and simply set it to zero.
+
+More specifically, for each considered value of $\beta$ we perform a backtest using a rolling window with a length of 250 days. We use the naive portfolio as the initial allocation and then each day re-estimate $\Sigma$ and implement the optimal portfolio taking transaction cost into account. Since our data set consist of 500 observations for each asset and we set the rolling window length to 250, it follows that we for each beta estimate a time series of optimal portfolios $\omega_{t}^{\beta}$ of length $500-250=250$. For each of the periods we calculate the realized gross portfolio return as:
+$$
+r_{t}^{\beta}=r_{t}^{\prime}\omega_{t}^{\beta}
+$$
+and the portfolio return net of transaction costs as, where we use the "actual" transactions cost parameter:
+$$xr_{t}^{\beta,nTC}=r_{t}^{\beta}-\beta_{true}\Vert\omega_{t+1}^{\beta}-\omega_{t+}^{\beta}\Vert_{2}$$
+
+where the $L_{2}$-norm is calculated as $\Vert\omega_{t+1}^{\beta}-\omega_{t+}^{\beta}\Vert_{2}=(\omega_{t+1}-\omega_{t+})^{\prime} B (\omega_{t+1}-\omega_{t+})$ such that it takes into account the asset-specific transaction costs.
+
+For each $\beta$ we can then calculate the average net return and standard deviation, $\hat{\mu}^{\beta,pf}$ and $\hat{\sigma}^{\beta,pf}$ based on the time series of realized net returns. The Sharpe-ratio is then calculated as the ratio between these.
+
+Results for both estimators of the the variance-covaraince matrix is reported below:
+```{r beta, include=FALSE}
+window_length <- 250
+
+periods <- nrow(returns_mat) - window_length # total number of out-of-sample periods
+
+
+# Initialize tibble for out-of-sample values first single estimator for single beta
+oos_values <- matrix(NA,
+                     nrow = periods,
+                     ncol = 3)
+colnames(oos_values) <- c("raw_return", "turnover", "net_return")
+
+# List of two tables for oos values
+all_values <-list(oos_values, oos_values)
+
+
+# Naive portfolio as initial allocation
+w_prev_1 <- w_prev_2 <- rep(1/N,N)
+
+# Range of betas
+betas <- 20 * qexp((1:99)/100)
+
+# Table with results for all betas and both estimators
+res <- tibble(beta = betas,
+              Sharpe_lw = NA,
+              Sharpe = NA)
+
+# Function
+oos_sharpe <- function(betas){
+  
+  for(j in seq_along(betas)){
+    # Rolling window
+    for(i in 1:periods){
+
+      # Extract specific window
+      return_window <- returns_mat[i : (i + window_length - 1),]
+      
+      # Sample moments, Ledoit wolf
+      Sigma_1 <- compute_ledoit_wolf(return_window)
+      mu_1 <- 0 * colMeans(return_window)
+      
+      # Optimal transaction cost robust portfolio
+      w_1 <- optimal_tc_weight(w_prev_1,mu_1,Sigma_1,B,beta=betas[j],gamma=4)
+      
+      # Evaluation
+      raw_return <- returns_mat[i + window_length, ] %*% as.matrix(w_1)
+      turnover <- t(as.vector(w_1)-as.vector(w_prev_1)) %*% B %*% (as.vector(w_1)-as.vector(w_prev_1))
+      
+      # Store realized returns
+      net_return <- raw_return - 1 * turnover
+      
+      # Store out-of-sample results in tibble
+      all_values[[1]][i,] <- c(raw_return, turnover, net_return)
+      
+      # Computes adjusted weights based on the weights and next period returns
+      w_prev_1 <- w_1 * as.vector(1 + (returns_mat[i + window_length, ]/100))
+      w_prev_1 <- as.numeric(w_prev_1 / sum(as.vector(w_prev_1)))
+      
+      
+      # Sample moments
+      Sigma_2 <- cov(return_window)
+      mu_2 <- 0 * colMeans(return_window)
+      
+      # Optimal transaction cost robust portfolio
+      w_2 <- optimal_tc_weight(w_prev_2,mu_2,Sigma_2,B,beta=betas[j],gamma=4)
+      
+      # Evaluation
+      raw_return <- returns_mat[i + window_length, ] %*% as.matrix(w_2)
+      turnover <- t(as.vector(w_2)-as.vector(w_prev_2)) %*% B %*% (as.vector(w_2)-as.vector(w_prev_2))
+      
+      # Store realized returns
+      net_return <- raw_return - 1 * turnover
+      
+      # Store out-of-sample results in tibble
+      all_values[[2]][i,] <- c(raw_return, turnover, net_return)
+      
+      # Computes adjusted weights based on the weights and next period returns
+      w_prev_2 <- w_2 * as.vector(1 + (returns_mat[i + window_length, ]/100 ))
+      w_prev_2 <- as.numeric(w_prev_2 / sum(as.vector(w_prev_2)))
+    }
+    
+    # Put data more nicely, so sharpe can be calculated  
+    all_values_1 <- lapply(all_values, as_tibble) %>% bind_rows(.id = "strategy")
+    
+    all_values_1 <- all_values_1 %>%
+      group_by(strategy) %>%
+      summarise(Mean = 250*mean(net_return),
+                SD = sqrt(250)*sd(net_return),
+                Sharpe = Mean/SD,
+                Turnover = 100 * mean(turnover))
+    
+    # Store results in table
+    res$Sharpe_lw[j] <- all_values_1$Sharpe[1]
+    res$Sharpe[j] <- all_values_1$Sharpe[2]
+    
+    # Values printed while the loop is running
+    print(res$Sharpe_lw[j])
+    print(res$Sharpe[j])
+    print(j)
+    
+  }
+  return(res)
+}
+
+# Obtain rolling window results
+results <- oos_sharpe(betas)
+```
+
+```{r fig3, fig.cap = "Annualized Sharpe ratios for different transaction costs parameter values",fig.width=4.5, fig.height=2.7}
+# Plot annualized Sharpe ratios for different transaction costs parameter values
+ggplot()+
+  geom_line(data=results,aes(y=Sharpe_lw,x= beta,colour="darkblue"),size=1 )+
+  geom_line(data=results,aes(y=Sharpe,x= beta,colour="red"),size=1) +
+  scale_color_discrete(name = "Estimator", labels = c("Ledoit Wolf", "Sample")) +
+  labs(x = "beta", y = "Annualized sharpe ratio") +
+  theme_light()
+
+```
+
+From the figure above we note, that the sample estimator of the variance-covaraince matrix clearly outperforms the Ledoit and Wolf shrinkage estimator, since it delivers higher out-of-sample Sharpe ratios for all $\beta$-values between 0 and 100. 
+
+On the one hand the transaction cost parameter improve the conditioning of the covariance matrix, but it also reduce the mean portfolio return. A change in the transaction cost parameter, $\beta$, therefore has an ambiguous effect of the Sharpe ratio. As evident from the figure, the annualized Sharpe ratio is increasing in the transaction cost parameter, $\beta$, for both estimators over the interval from 0 to 100. This means that positive effect from conditioning the covariance matrix dominates the negative effect from decreasing the mean. However, this overall positive effect on the Sharpe ratio seem to be largest for increases in small values of $\beta$, so the effect of further penalizing turnover vanishes as $\beta$ goes to 100. 
+
+We assumed that the $\beta$-value reflecting the actual transaction costs is $\beta_{true}=1$. When we use this value in the optimization problem it does not deliver the highest possible out-of-sample annualized Sharpe ratio. This means that it can be optimal to choose theoretically sub-optimal portfolios based on transaction cost parameter values that do not reflect the actual transaction costs. If we instead define our objective as maximizing the annualized out-of-sample Sharpe-ratio it is therefore tempting to view $\beta$ as a parameter to be optimized, since our results indicate that it increases the Sharpe ratio if we choose a $\beta$-value which is higher than the true one.
+
+## Exercise 4
+In the last exercise we perform a full-fledged backtesting strategy with proportional $L_1$ transactions costs. We compare the out-of-sample performance of a naive portfolio where the 40 assets are equally weighted; a portfolio which computes the theoretical optimal portfolio weights with optimal ex-ante adjustment for the $L_1$ transaction costs in the spirit of Hautsch et al. (2019) and a minimum variance portfolio with short sell constraint as suggested by Jagannathan and Ma (2003). 
+$$\nu_{t}\left(\omega_{t+1},\omega_{t+},\beta\right)=\beta\left\Vert \omega_{t+1}-\omega_{t+}\right\Vert _{1}=\beta\sum_{i=1}^{N}\left|\omega_{i,t+1}-\omega_{i,t+}\right|$$
+With $L_1$ transactions costs the cost is proportional to the sum of absolute re-balancing and thereby represent a more realistic proxy than the quadratic transaction costs we use in the exercises above. As is common in the literature we use a penalization term $\left(\beta\right)$ of $50$ bp. 
+
+To perform the portfolio backtesting strategy we start by defining functions that compute the optimal weights for each of the three portfolios.
+
+The naive portfolio places equal weights on each of the assets. $$\omega=\frac{1}{N}\iota$$ In our cases with 40 assets each assets has a weight of 2,5%. 
+
+As suggested by Hautsch et al. (2019) we compute the theoretical optimal portfolio weights with optimal ex-ante adjustment for the transaction costs. $$\omega_{t+1}^{*}=\max_{\omega\in\mathbb{R}^{N},\iota\omega=1}\omega^{\prime}\mu-\beta\left\Vert \omega_{t+1}-\omega_{t+}\right\Vert _{1}-\frac{\gamma}{2}\omega^{\prime}\Sigma\omega\text{ s.t. }\iota^{\prime}\omega=1$$ It should be noted that with $L_1$ transaction cost there does not exist a closed form solution, therefore solve the optimization problem using a non-linear constraint optimizer. 
+
+Jagannathan and Ma (2003) show that constructing a minimum variance portfolio with short-selling constraints is equivalent to shrinking the larger elements of the covariance matrix. When computing the the portfolio weights of the short-sell constrained minimum variance portfolio we face the following optimization problem: $$\omega_{t+1}^{\text{mvp no s.}}=\min_{\omega\in\mathbb{R}^{N}}\omega^{\prime}\Sigma\omega\text{ s.t. }\iota^{\prime}\omega=1\text{ and }\omega_{i}\geq0\forall i=1,\dots N$$ As explained by Jagannathan and Ma (2003) introducing short-selling constraint may as other shrinking methods lead to a more precise estimate of true population covariance given that a large covariance is due to sampling error. However if the true population covariance is indeed large, short sell constraints and shrinkage will result in specification error.
+
+```{r optimers}
+# Portfolio optimzer with L1 transaction costs
+optimal_tc_weight_L1 <- function(w_prev, 
+                                 mu, 
+                                 Sigma,
+                                 beta = 50/10000, 
+                                 gamma = 4){
+  # Objective function
+  fn <- function(w_new){
+    -t(w_new) %*% mu + beta * norm(as.matrix(w_new) - as.matrix(w_prev), type = "1") + gamma/2 * t(w_new) %*% Sigma %*% w_new
+  }
+  
+  # Weight constraint
+  constraint <- function(w_new){sum(w_new)-1}
+  
+  w_opt <- alabama::constrOptim.nl(
+                                 par = w_prev,
+                                 fn = fn,
+                                 heq = constraint)
+  return(w_opt$par) 
+}
+
+# Minimum variance portfolio with no short constraint
+optimal_constrained_mvp_weights <- function(Sigma){
+  N <- ncol(Sigma)
+  w_opt <- solve.QP(Dmat = Sigma,
+                    dvec = rep(0, N), 
+                    Amat = cbind(1, diag(N)), 
+                    bvec = c(1, rep(0, N)), 
+                    meq = 1)
+    
+    return(w_opt$solution)
+}
+```
+
+We then use these functions to perform a out-of-sample backtest and evaluate the performance of the three strategies. In our backtest we use a window-length of 250. The mean is computed as the sample mean of the returns, while the covariance is estimated using a Ledoit-Wolf shrinkage estimation. To compare the performance of the three strategies we compute the annualized out-of-sample means, SD, Sharpe ratios and turnover. The returns are the raw returns net of trading costs. 
+```{r portfolio backtesting, include=FALSE}
+# Window length 
+window_length <- 250
+periods <- nrow(returns) - window_length # total number of out-of-sample periods
+
+gamma=4
+
+beta <- 50/10000 # Transaction costs
+oos_values <- matrix(NA, 
+                     nrow = periods, 
+                     ncol = 3) # A matrix to collect all returns
+colnames(oos_values) <- c("raw_return", "turnover", "net_return") # we implement 3 strategies
+
+all_values <- list(oos_values, 
+                   oos_values,
+                   oos_values)
+
+w_prev_a <- w_prev_b <- w_prev_c <- rep(1/N ,N)
+
+for(i in 1:periods){ # Rolling window 
+  
+  # Extract information
+  return_window <- returns_mat[i : (i + window_length - 1),] # the last X returns available up to date t
+  
+  # Sample moments 
+  Sigma <- compute_ledoit_wolf(return_window)
+  mu <- colMeans(return_window)
+  N<-ncol(Sigma)
+  
+  # Portfolio A (naive)
+  w_a <- rep(1/N,N)
+  # Evaluation 
+  raw_return <- returns_mat[i + window_length, ] %*% w_a
+  turnover <- norm(as.matrix(w_a) - as.matrix(w_prev_a), type = "1")
+  # Store realized returns
+  net_return <- raw_return - beta * turnover
+  all_values[[1]][i, ] <- c(raw_return, turnover, net_return)
+  # Computes adjusted weights based on the weights and next period returns
+  w_prev_a <- w_a * as.vector(1 + returns_mat[i + window_length, ] )
+  w_prev_a <- w_prev_a / sum(as.vector(w_prev_a))
+  
+  # Portfolio B (Optimal TC robust portfolio)
+  w_b <- optimal_tc_weight_L1(w_prev = w_prev_b, mu = mu, Sigma = Sigma, beta = beta, gamma = gamma)
+  # Evaluation
+  raw_return <- returns_mat[i + window_length, ] %*% w_b
+  turnover <- norm(as.matrix(w_b) - as.matrix(w_prev_b), type = "1")
+  # Store realized returns
+  net_return <- raw_return - beta * turnover
+  all_values[[2]][i, ] <- c(raw_return, turnover, net_return)
+  # Computes adjusted weights based on the weights and next period returns
+  w_prev_b <- w_b * as.vector(1 + returns_mat[i + window_length, ] )
+  w_prev_b <- w_prev_b / sum(as.vector(w_prev_b))
+
+  # Portfolio C (Optimal global minimum variance with constraint - Jagannathan and MA, 2003)
+  w_c <- optimal_constrained_mvp_weights(Sigma = Sigma)
+  # Evaluation 
+  raw_return <- returns_mat[i + window_length, ] %*% w_c
+  turnover <- norm(as.matrix(w_c) - as.matrix(w_prev_c), type = "1")
+  # Store realized returns
+  net_return <- raw_return - beta * turnover
+  all_values[[3]][i, ] <- c(raw_return, turnover, net_return)
+  # Computes adjusted weights based on the weights and next period returns
+  w_prev_c <- w_c * as.vector(1 + returns_mat[i + window_length, ] )
+  w_prev_c <- w_prev_c / sum(as.vector(w_prev_c))
+}
+
+
+all_values <- lapply(all_values, as_tibble) %>% bind_rows(.id = "strategy")
+
+```
+```{r portfort backtesting results}
+all_values %>%
+  group_by(strategy) %>%
+  summarise(Mean = 250*mean(net_return),
+            SD = sqrt(250) * sd(net_return),
+            Sharpe = Mean/SD,
+            Turnover = 100 * mean(turnover)) %>%
+  mutate(strategy = case_when(strategy == 1 ~ "Naive",
+                              strategy == 2 ~ "MV (TC)", 
+                              strategy == 3 ~ "MV short-sell constrained")) %>% 
+  knitr::kable(caption = "Performance of portfolio strategies" ,digits = 4) %>% kable_styling(position = "center")
+```
+As shown in the table above the theoretical optimal portfolio that incorporate transaction costs ex-ante has the lowest turnover and second lowest SD. The low turnover compared to the other portfolios is expected since this problem incorporates the transactions costs ex-ante. When the turnover is zero it might be an indication of the transaction cost parameter $\beta$ being so large that reallocation is not profitable and the weights will be equal to the initial allocation as stated in proposition 2 by Hautsch et al. (2019). On the other hand the the minimum variance portfolio with short-sell constraint had the lowest SD but also the highest turnover and and lowest annual net return with a annual return of just 7.7 pct. The lower return is partly due to the high turnover and the costs associated with re-balancing the portfolio, but can also be contributed to it being a minimum variance portfolio. Opposed to the optimal portfolio with transaction costs it  disregards the return and only aims to minimize the volatility.
+
+We further note that the naive portfolio has a higher mean and the highest Sharpe-ratio. If we evaluate the strategies performance based on the Sharpe-Ratio's then an investor would be better of choosing the naive portfolio based on our analysis. This might be an indication that even though incorporating transaction costs ex ante or using short sell constraint as can regularize the underlying covariance matrix it might not always be sufficient to outperform a simple naive portfolio. 
+
+
+
+
+
+
