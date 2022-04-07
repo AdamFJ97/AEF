@@ -1,0 +1,930 @@
+---
+title: "MA2 - Advanced Empirical Finance"
+date: "9 May 2021"
+header-includes:
+  \usepackage[utf8]{inputenc}
+  \usepackage[T1]{fontenc}
+  \usepackage{floatrow}
+  \floatsetup[figure]{capposition=top}
+  \floatsetup[table]{capposition=top}
+  \floatplacement{figure}{H}
+  \floatplacement{table}{H}
+geometry: margin=1.9cm
+fontsize: 12pt
+line-height: 1.5
+output: pdf_document
+toc: yes
+toc_depth: 3
+classoption: a4paper
+
+---
+\newpage
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(cache = TRUE)
+
+# Load packages
+library("tidyverse")
+library("lubridate") # for working with dates
+library("tidymodels")
+library("glmnet")
+library("latex2exp")
+library("sandwich")
+library("knitr")
+library("kableExtra")
+library("rpart") # regression trees  
+library("randomForest") # random forrests 
+library("keras")
+library("tensorflow")
+library("xtable")
+library("latticeExtra")
+library("reshape2")
+
+start_time <- Sys.time()
+
+```
+
+## Introduction
+In this assignment we attempt to partly replicate the results concerning  empirical asset pricing with machine learning from Gu, Kelly & Xiu (2020). Using three machine learning methods; a elastic net, random forest and a neural network we conduct a large scale empirical analysis to compare the out-of-sample stock predictions for each method. 
+
+``` {r Load and clean data}
+# Load data
+data_raw <- read_rds("mandatory_assignment_2_clean_sample.rds") %>%
+  select(date, 
+         mktcap, 
+         permno, 
+         sic2, 
+         ret.adj, 
+         mom1m,
+         mom12m,
+         indmom, 
+         dolvol, 
+         baspread, 
+         retvol,
+         idiovol,
+         maxret,
+         betasq,
+         turn,
+         b_m,
+         lty)
+
+# Dataset with interaction terms
+data_interaction <- data_raw %>%
+  ungroup() %>%
+  select(date,
+         permno,
+         ret.adj:lty) %>%
+  pivot_longer(b_m:lty, 
+               names_to = "macro", 
+               values_to = "macro_value") %>%
+  pivot_longer(mom1m:turn) %>%
+  transmute(permno, 
+            date, 
+            ret.adj, 
+            name = paste0(macro, "_", name), 
+            s = macro_value * value) %>% 
+  pivot_wider(names_from = name, values_from = s) %>%
+  select(-c(permno, date, ret.adj))
+
+# Add columns with interaction terms to dataset
+data <- cbind(data_raw, data_interaction)
+
+# One-hot encoding of SIC2 variable
+data <- data %>%
+  pivot_wider(values_from = sic2, names_from = sic2, names_prefix = "sic.") %>%
+  mutate_at(vars(contains("sic")), function(x) if_else(is.na(x), 0, 1))
+
+```
+
+
+##Exercise 1
+
+In this assignment we do an empirical analysis of a sample consisting of adjusted returns for more than 13.000 stocks over the 20-year period from 1996 to 2016. In our analysis we further make use of additional data provided by the homepage of Goyal Welsh. More specifically, we use 74 industry classifications and a predictor set consisting of characteristics for each stock, but also two aggregate macro-economic time series variables are used, namely the long-term yield and book-to-market ratio. An overview of all the included variables is provided in table 1. The table contain 11 stock characteristic variables, but "mktcap" is not considered a part of the main 10 predictors, since it will only be used in exercise 5. In our analysis we also make use of interaction variables among macro-economic time series and the 10 main stock characteristics. This yields additional 20 variables.
+
+```{r tabel1, echo=TRUE}
+# tabel - overview of variables
+explanation <- data.frame(
+  "Variable_names" =  data %>% select(date:lty) %>% select(-permno) %>% colnames(),
+  "Explanation" = c("Date, month", "Market Capitalization",
+                    "Adjusted returns", "1-month momentum",
+                    "12-month momentum", "Industry momentum",
+                    "Dollar trading volume", "Bid-ask spread",
+                    "Return volatility", "Idiocratic return volatility",
+                    "Maximum daily return", "Beta squared",
+                    "Turnover", "Book-to-market",
+                    "Long-term yield"),
+  stringsAsFactors = FALSE
+)
+
+explanation %>% knitr::kable(caption = "Parameters descriptions")
+```
+
+```{r }
+#figure 1: number of securities by industry
+
+#stocks by industry
+data_industry <- data_raw %>% 
+  group_by(sic2, date) %>%
+  summarize(n = n())
+
+# find largest industries in February 1996
+largest_industries_1996 <- data_industry[!duplicated(data_industry$sic2),] %>%
+  arrange(n) %>%
+  tail(n = 10)
+
+#legend data
+legend_industry_data <- c("48", "13", "63", "49", "38", "35", "28", "36", "73", "60")
+
+
+#plot of stocks by industry
+data_raw %>%
+  rename("Industry" = sic2) %>%
+  group_by(Industry, date) %>%
+  summarize(n = n()) %>%
+  mutate(Industry = as.character(Industry)) %>%
+  ggplot(aes(fill=Industry, y = n, x = date)) +
+  geom_bar(position = "stack", stat="identity") +
+  labs(x = "", y = "Number of Securities", color = "(Industry") +
+  scale_fill_discrete(breaks = legend_industry_data) +
+  theme_classic()
+```
+
+
+
+
+```{r }
+# Figure 2: macro-economic time series
+data %>%
+  select(c(date,b_m, lty)) %>%
+  rename("Book-to-market" = b_m,
+         "Long-term yield" = lty) %>%
+  melt(id.vars="date", variable.name = "series") %>%
+  ggplot(aes(date, value)) +
+  geom_line(colour = "steelblue") +
+  facet_wrap(~ series, scales = "free") +
+  theme_classic()
+```
+
+
+##Exercise 2
+
+
+##Exercise 3
+
+```{r dividing dataset for machine learning implementation}
+# Saving date, permno and market capitalization for use in exercise 5
+info_variables <- data %>% select(date,permno,mktcap) %>% 
+   filter(.$date %within% interval(ymd("2012-01-01"), ymd("2016-12-01")))
+
+# De-selecting variables not used for the machine learning methods
+ml_data <- data %>% select(-permno, -mktcap)
+
+# Filtering dataset for testing of the models
+test_data <- ml_data %>%
+  filter(.$date %within% interval(ymd("2012-01-01"), ymd("2016-12-01"))) %>% select(-date)
+
+# The remaining observations of the dataset are divided for training and validation
+training_validation_data <- ml_data %>%
+  filter(!.$date %within% interval(ymd("2012-01-01"), ymd("2016-12-01")))  %>% select(-date)
+
+# Splitting the training and validation data with a fraction of 0.8 for training
+training_validation_data <- rsample::initial_time_split(training_validation_data, prop = 0.8)
+training_data <- rsample::training(training_validation_data)
+validation_data <- rsample::testing(training_validation_data)
+
+# Split into x and y variants of test, training and validation sets
+x_training = training_data %>% select(-ret.adj) %>% as.matrix()
+y_training = training_data %>% select(ret.adj) %>% as.matrix()
+
+x_validation = validation_data %>% select(-ret.adj) %>% as.matrix()
+y_validation = validation_data %>% select(ret.adj) %>% as.matrix()
+
+x_testing = test_data %>% select(-ret.adj) %>% as.matrix()
+y_testing = test_data %>% select(ret.adj) %>% as.matrix()
+```
+
+
+##Exercise 4
+
+```{r Elastic net}
+# Constructing function that computes MSPE as function of both hyperparameters
+elasticnet_training <- function(rho, lambda){
+  elasticnet_fit <- glmnet(x_training, y_training, alpha = rho, lambda = lambda)
+  
+  # Obtain prediction of y based on training and validation data
+  y_hat_training <- predict(elasticnet_fit, x_training)
+  y_hat_validation <- predict(elasticnet_fit, x_validation)
+  
+  # compute mspe and save all results to a list
+  mspe_training <- mean((y_hat_training - y_training)^2)
+  mspe_validation <- mean((y_hat_validation - y_validation)^2)
+  list(rho, lambda, mspe_training, mspe_validation)
+}
+
+# Set up grid of hyperparameters
+elasticnet_grid <- expand.grid(rho = seq(from=0.1, to=0.9, length.out = 9),
+                       lambda = seq(from=10e-4, to=10e-1, length.out = 9))
+
+# Initializing a tibble to store results from training
+elasticnet_results <- tibble(rho = numeric(nrow(elasticnet_grid)),
+                     lambda = numeric(nrow(elasticnet_grid)),
+                     mspe_training = numeric(nrow(elasticnet_grid)),
+                     mspe_validation = numeric(nrow(elasticnet_grid)))
+
+# Looping over grid of hyperparameters and fitting a model for each pair of rho and lambda
+for (i in seq_len(nrow(elasticnet_grid))) {
+  model_score <- elasticnet_training(elasticnet_grid[[i, 1]], elasticnet_grid[[i, 2]])
+  
+  # Saving results from each model the the tibble of results
+  elasticnet_results$rho[i] = model_score[1]
+  elasticnet_results$lambda[i] = model_score[2]
+  elasticnet_results$mspe_training[i] = model_score[3]
+  elasticnet_results$mspe_validation[i] = model_score[4]
+}
+
+# rearrangering results to a dataframe in order to construct level-plots
+elasticnet_results <- as.data.frame(elasticnet_results)
+elasticnet_results[] <- lapply(elasticnet_results, as.numeric)
+```
+
+```{r }
+# Plotting for overview on effect of hyperparameters on MSPE
+# Plot with mspe for training data
+wireframe(mspe_training ~ rho * lambda, data = elasticnet_results, col.regions = terrain.colors(100),
+          main= "Figure 4: MSPE for traning data in Elastic Net model",
+          xlab = expression(rho), ylab = expression(lambda), zlab = "mspe", drape = TRUE,
+  colorkey = TRUE)
+
+
+# Plot with mspe for validation data
+wireframe(mspe_validation ~ rho * lambda, data = elasticnet_results, col.regions = terrain.colors(100),
+          main= "Figure 4: MSPE for traning data in Elastic Net model",
+          xlab = expression(rho), ylab = expression(lambda), zlab = "mspe", drape = TRUE,
+  colorkey = TRUE)
+```
+
+```{r}
+# From the plots it seems that the best model has parameters:
+# lambda = 0.001, rho = 0.2
+en <-glmnet(x_training, y_training, alpha = 0.5, lambda = 0.1)
+
+en_time <- Sys.time()
+en_comp <- en_time - start_time
+```
+`
+
+
+```{r }
+
+rf_training <- function(trees, depth, tries){
+  rf_model <- randomForest(ret.adj ~ ., data=training_data,
+                           ntree=trees, maxnodes = depth,
+                           mtry=tries)
+
+  y_hat_training <- predict(rf_model, x_training)
+  y_hat_validation <- predict(rf_model, x_validation)
+
+  mspe_training <- mean((y_hat_training - y_training)^2)
+  mspe_validation <- mean((y_hat_validation - y_validation)^2)
+
+  list(trees, depth, tries, mspe_training, mspe_validation)
+}
+
+# Setting up grid of hyperparameters
+rf_grid <- expand.grid(trees = c(50, 100), depth = c(1, 2, 3, 4, 5),
+                       mtry = c(3, 5, 10, 20))
+
+# Initializing a tibble to store results from training
+rf_results <- tibble(trees = numeric(nrow(rf_grid)),
+                     depth = numeric(nrow(rf_grid)),
+                     tries= numeric(nrow(rf_grid)),
+                     mspe_training = numeric(nrow(rf_grid)),
+                     mspe_validation = numeric(nrow(rf_grid)))
+
+# Looping over grid of hyperparameters and fitting a model for each pair
+for (i in seq_len(nrow(rf_grid))) {
+  model_score <- rf_training(rf_grid[[i, 1]], rf_grid[[i, 2]], rf_grid[[i, 3]])
+
+  # Saving results in a rather unelegant way
+  rf_results$trees[i] = model_score[1]
+  rf_results$depth[i] = model_score[2]
+  rf_results$tries[i] = model_score[3]
+  rf_results$mspe_training[i] = model_score[4]
+  rf_results$mspe_validation[i] = model_score[5]
+}
+
+# Householding
+rf_results <- as.data.frame(rf_results)
+rf_results[] <- lapply(rf_results, as.numeric)
+
+# Dividing results by number of trees
+rf_results_t50 <- rf_results[rf_results$trees==50,]
+rf_results_t100 <- rf_results[rf_results$trees==100,]
+
+```
+
+```{r }
+# Plotting for overview on effect of hyperparameters on MSPE
+# Plot with mspe for training data
+wireframe(mspe_training ~ depth * tries, data = rf_results_t100, col.regions = terrain.colors(100),
+          main= "Figure 4: MSPE for traning data in RF model",
+          xlab = "Depth", ylab = "Tries", zlab = "mspe", drape = TRUE,
+  colorkey = TRUE, screen = list(z = -60, x = -60))
+
+
+# Plot with mspe for validation data
+wireframe(mspe_validation ~ depth * tries, data = rf_results_t50, col.regions = terrain.colors(100),
+          main= "Figure 4: MSPE for traning data in RF model",
+          xlab = "Depth", ylab = "Tries", zlab = "mspe", drape = TRUE,
+  colorkey = TRUE, screen = list(z = -60, x = -60))
+
+wireframe(mspe_training ~ depth * tries, data = rf_results_t100, col.regions = terrain.colors(100),
+          main= "Figure 4: MSPE for traning data in RRF model",
+          xlab = "Depth", ylab = "Tries", zlab = "mspe", drape = TRUE,
+  colorkey = TRUE, screen = list(z = -60, x = -60))
+
+# Plot with mspe for validation data
+wireframe(mspe_validation ~ depth * tries, data = rf_results_t100, col.regions = terrain.colors(100),
+          main= "Figure 4: MSPE for traning data in RF model",
+          xlab = "Depth", ylab = "Tries", zlab = "mspe", drape = TRUE,
+  colorkey = TRUE, screen = list(z = -60, x = -60))
+```
+
+```{r}
+# From the plots it seems that the best model has parameters:
+# maxnodes = 12, mtry = 18
+rf <- randomForest(ret.adj ~ ., data=training_data,
+                         ntree = 100, maxnodes = 5,
+                         mtry = 20)
+
+rf_time <- Sys.time()
+rf_comp <- rf_time - en_time
+```
+
+
+```{r}
+# Neural network
+
+y_hat1_test <- vector()
+y_hat2_test <- vector()
+y_hat3_test <- vector()
+y_hat4_test <- vector()
+y_hat5_test <- vector()
+
+## 1 LAYER ##
+
+lambdas <- seq(from = 0.1, to = 0.9, by =0.1) 
+
+
+res1 <- tibble(lambda = lambdas,
+               training_error = NA,
+               validation_error = NA)
+
+for (i in seq_along(lambdas)){
+  model_1 <- keras_model_sequential() %>% 
+    layer_flatten(input_shape = 104) %>% 
+    layer_dense(units = 32, activation = "relu",
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(1)
+  
+  model_1 %>% 
+    compile(
+      loss = "mse",
+      optimizer = "adam",
+      metrics = "mean_absolute_error")
+  
+  model_1 %>% 
+    fit(
+      x = x_training, 
+      y = y_training,
+      validation_data = list(x_validation, 
+                             y_validation),
+      epochs =100,
+      batch_size=10000,
+      callbacks = callback_early_stopping(
+        monitor = "val_mean_absolute_error",
+        min_delta = 0,
+        patience = 10,
+        verbose = 0,
+        mode = "min",
+        baseline = NULL,
+        restore_best_weights = TRUE))
+  
+  y_hat1_training <- predict(model_1, x_training)
+  y_hat1_validation <- predict(model_1, x_validation)
+  y_hat1_test <- cbind(y_hat1_test, predict(model_1, x_testing))
+  res1$training_error[i] <- mean(((y_hat1_training - y_training)^2))
+  res1$validation_error[i] <- mean(((y_hat1_validation - y_validation)^2))
+}  
+
+
+
+## 2 LAYERS ##
+
+res2 <- tibble(lambda = lambdas,
+               training_error = NA,
+               validation_error = NA)
+
+for (i in seq_along(lambdas)){
+  model_2 <- keras_model_sequential() %>% 
+    layer_flatten(input_shape = 104) %>% 
+    layer_dense(units = 32, activation = "relu",
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    #  layer_dropout(0.6) %>%
+    layer_dense(units = 16, 
+                activation = "relu", 
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(1)
+  
+  model_2 %>% 
+    compile(
+      loss = "mse",
+      optimizer = "adam",
+      metrics = "mean_absolute_error")
+  
+  model_2 %>% 
+    fit(
+      x = x_training,  
+      y = y_training,
+      validation_data = list(x_validation, 
+                             y_validation),
+      epochs =100,
+      batch_size=10000,
+      callbacks = callback_early_stopping(
+        monitor = "val_mean_absolute_error",
+        min_delta = 0,
+        patience = 10,
+        verbose = 0,
+        mode = "min",
+        baseline = NULL,
+        restore_best_weights = TRUE))
+  
+  y_hat2_training <- predict(model_2, x_training)
+  y_hat2_validation <- predict(model_2, x_validation)
+  y_hat2_test <- cbind(y_hat2_test, predict(model_2, x_testing))
+  res2$training_error[i] <- mean(((y_hat2_training - y_training)^2))
+  res2$validation_error[i] <- mean(((y_hat2_validation - y_validation)^2))
+}  
+
+
+### 3 layers ###
+
+res3 <- tibble(lambda = lambdas,
+               training_error = NA,
+               validation_error = NA)
+
+for (i in seq_along(lambdas)){
+  model_3 <- keras_model_sequential() %>% 
+    layer_flatten(input_shape = 104) %>% 
+    layer_dense(units = 32, activation = "relu",
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    #  layer_dropout(0.6) %>%
+    layer_dense(units = 16, 
+                activation = "relu", 
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 8, 
+                activation = "relu", 
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(1)
+  
+  model_3 %>% 
+    compile(
+      loss = "mse",
+      optimizer = "adam",
+      metrics = "mean_absolute_error")
+  
+  model_3 %>% 
+    fit(
+      x = x_training,  
+      y = y_training,
+      validation_data = list(x_validation, 
+                             y_validation),
+      epochs =100,
+      batch_size=10000,
+      callbacks = callback_early_stopping(
+        monitor = "val_mean_absolute_error",
+        min_delta = 0,
+        patience = 10,
+        verbose = 0,
+        mode = "min",
+        baseline = NULL,
+        restore_best_weights = TRUE))
+  
+  y_hat3_training <- predict(model_3, x_training)
+  y_hat3_validation <- predict(model_3, x_validation)
+  y_hat3_test <- cbind(y_hat3_test, predict(model_3, x_testing))
+  res3$training_error[i] <- mean(((y_hat3_training - y_training)^2))
+  res3$validation_error[i] <- mean(((y_hat3_validation - y_validation)^2))
+}  
+
+### 4 layers ###
+
+res4 <- tibble(lambda = lambdas,
+               training_error = NA,
+               validation_error = NA)
+
+for (i in seq_along(lambdas)){
+  model_4 <- keras_model_sequential() %>% 
+    layer_flatten(input_shape = 104) %>% 
+    layer_dense(units = 32, activation = "relu",
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    #  layer_dropout(0.6) %>%
+    layer_dense(units = 16, 
+                activation = "relu", 
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 8, 
+                activation = "relu", 
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 4, 
+                activation = "relu", 
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(1)
+  
+  model_4 %>% 
+    compile(
+      loss = "mse",
+      optimizer = "adam",
+      metrics = "mean_absolute_error")
+  
+  model_4 %>% 
+    fit(
+      x = x_training,  
+      y = y_training,
+      validation_data = list(x_validation, 
+                             y_validation),
+      epochs =100,
+      batch_size=10000,
+      callbacks = callback_early_stopping(
+        monitor = "val_mean_absolute_error",
+        min_delta = 0,
+        patience = 10,
+        verbose = 0,
+        mode = "min",
+        baseline = NULL,
+        restore_best_weights = TRUE))
+  
+  y_hat4_training <- predict(model_4, x_training)
+  y_hat4_validation <- predict(model_4, x_validation)
+  y_hat4_test <- cbind(y_hat4_test, predict(model_4, x_testing))
+  res4$training_error[i] <- mean(((y_hat4_training - y_training)^2))
+  res4$validation_error[i] <- mean(((y_hat4_validation - y_validation)^2))
+}  
+
+### 5 layers ###
+
+res5 <- tibble(lambda = lambdas,
+               training_error = NA,
+               validation_error = NA)
+
+for (i in seq_along(lambdas)){
+  model_5 <- keras_model_sequential() %>% 
+    layer_flatten(input_shape = 104) %>% 
+    layer_dense(units = 32, activation = "relu",
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    #  layer_dropout(0.6) %>%
+    layer_dense(units = 16, 
+                activation = "relu", 
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 8, 
+                activation = "relu", 
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 4, 
+                activation = "relu", 
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(units = 2, 
+                activation = "relu", 
+                kernel_regularizer = regularizer_l1(l = i)) %>%
+    layer_batch_normalization() %>%
+    layer_dense(1)
+  
+  model_5 %>% 
+    compile(
+      loss = "mse",
+      optimizer = "adam",
+      metrics = "mean_absolute_error")
+  
+  model_5 %>% 
+    fit(
+      x = x_training, 
+      y = y_training,
+      validation_data = list(x_validation, 
+                             y_validation),
+      epochs =100,
+      batch_size=10000,
+      callbacks = callback_early_stopping(
+        monitor = "val_mean_absolute_error",
+        min_delta = 0,
+        patience = 10,
+        verbose = 0,
+        mode = "min",
+        baseline = NULL,
+        restore_best_weights = TRUE))
+  
+  y_hat5_training <- predict(model_5, x_training)
+  y_hat5_validation <- predict(model_5, x_validation)
+  y_hat5_test <- cbind(y_hat5_test, predict(model_5, x_testing))
+  res5$training_error[i] <- mean(((y_hat5_training - y_training)^2))
+  res5$validation_error[i] <- mean(((y_hat5_validation - y_validation)^2))
+}  
+
+
+
+min_NN1 <- as.numeric(min(res1$validation_error))
+min_NN2 <- as.numeric(min(res2$validation_error))
+min_NN3 <- as.numeric(min(res3$validation_error))
+min_NN4 <- as.numeric(min(res4$validation_error))
+min_NN5 <- as.numeric(min(res5$validation_error))
+
+lambda_NN1 <- which(res1$validation_error == min_NN1)
+lambda_NN2 <- which(res2$validation_error == min_NN2)
+lambda_NN3 <- which(res3$validation_error == min_NN3)
+lambda_NN4 <- which(res4$validation_error == min_NN4)
+lambda_NN5 <- which(res5$validation_error == min_NN5)
+
+# dataset for plots
+res1_plot <- res1 %>%
+  pivot_longer("training_error":"validation_error") %>%
+  cbind(model='NN1')
+
+res2_plot <- res2 %>%
+  pivot_longer("training_error":"validation_error") %>%
+  cbind(model='NN2')
+
+res3_plot <- res3 %>%
+  pivot_longer("training_error":"validation_error") %>%
+  cbind(model='NN3')
+
+res4_plot <- res4 %>%
+  pivot_longer("training_error":"validation_error") %>%
+  cbind(model='NN4')
+
+res5_plot <- res5 %>%
+  pivot_longer("training_error":"validation_error") %>%
+  cbind(model='NN5')
+
+neural_net_results <- rbind(res1_plot, res2_plot, res3_plot, res4_plot, res5_plot)
+
+
+
+
+
+#graph
+neural_net_results %>%
+  rename("Sample"=name) %>%
+  ggplot(aes(x = lambda, y  = value, color = Sample)) +
+  geom_point() + 
+  labs(y = "MSPE", x = "lambda")+ 
+  facet_wrap("model") +
+  scale_color_manual(labels = c("Training", "Sample"), values = c("Red", "Blue")) +
+  theme(panel.spacing.x = unit(4, "mm")) +
+  theme_light()
+
+#title: Mean squared prediction errors for model NN1-NN5
+
+nn_time <- Sys.time()
+nn_comp <- nn_time - rf_time
+
+```
+
+
+##Exercise 5
+
+
+```{r }
+# Compute predicted returns for each tuned model using the out-of-sample testing data
+predicted_ret_en <- as.data.frame(predict(en, x_testing))
+predicted_ret_rf <- as.data.frame(predict(rf, x_testing))
+
+y_hat1_test <- y_hat1_test  %>% as.data.frame()
+colnames(y_hat1_test)[lambda_NN1] <- "ret_pred_nn1"
+predicted_ret_nn1 <- y_hat1_test %>% select(ret_pred_nn1)
+
+y_hat2_test <- y_hat2_test  %>% as.data.frame()
+colnames(y_hat2_test)[lambda_NN2] <- "ret_pred_nn2"
+predicted_ret_nn2 <- y_hat2_test %>% select(ret_pred_nn2)
+
+y_hat3_test <- y_hat3_test  %>% as.data.frame()
+colnames(y_hat3_test)[lambda_NN3] <- "ret_pred_nn3"
+predicted_ret_nn3 <- y_hat3_test %>% select(ret_pred_nn3)
+
+y_hat4_test <- y_hat4_test  %>% as.data.frame()
+colnames(y_hat4_test)[lambda_NN4] <- "ret_pred_nn4"
+predicted_ret_nn4 <- y_hat4_test %>% select(ret_pred_nn4)
+
+y_hat5_test <- y_hat5_test  %>% as.data.frame()
+colnames(y_hat5_test)[lambda_NN5] <- "ret_pred_nn5"
+predicted_ret_nn5 <- y_hat5_test %>% select(ret_pred_nn5)
+
+
+```
+
+```{r}
+# Construction of function that computes 10-1 portfolio strategies
+portfolio_func <- function(predicted_ret){
+  # Add realized returns, date, permno and market capitalization
+  y_model <- cbind(predicted_ret, y_testing, info_variables)
+  
+  # setting column names
+  colnames(y_model) <- c("predicted_return", "actual_return",  "date", "permno", "mktcap")
+  
+  # calculate percentiles of predictions
+  percentiles <- seq(from= 0.1, to= 0.9, by= 0.1)
+  percentiles_names <- map_chr(percentiles, ~paste0("q", .x*100))
+  percentiles_funs <- map(percentiles,
+                        ~partial(quantile, probs = .x, na.rm = TRUE)) %>%
+  set_names(nm = percentiles_names)
+
+  quantiles <- y_model %>%
+    group_by(date) %>%
+    summarise_at(vars(predicted_return), lst(!!!percentiles_funs))
+  
+  # Sort all stocks into decile portfolios
+  portfolios <- y_model %>%
+  left_join(quantiles, by = "date") %>%
+  mutate(portfolio = case_when(predicted_return <= q10 ~ 1L,
+                                 predicted_return > q10 & predicted_return <= q20 ~ 2L,
+                                 predicted_return > q20 & predicted_return <= q30 ~ 3L,
+                                 predicted_return > q30 & predicted_return <= q40 ~ 4L,
+                                 predicted_return > q40 & predicted_return <= q50 ~ 5L,
+                                 predicted_return > q50 & predicted_return <= q60 ~ 6L,
+                                 predicted_return > q60 & predicted_return <= q70 ~ 7L,
+                                 predicted_return > q70 & predicted_return <= q80 ~ 8L,
+                                 predicted_return > q80 & predicted_return <= q90 ~ 9L,
+                                 predicted_return > q90 ~ 10L))
+  
+  portfolios_ts <- portfolios %>%
+    mutate(portfolio = as.character(portfolio)) %>%
+    group_by(portfolio, date) %>%
+    summarize(ret_vw= weighted.mean(actual_return, mktcap, na.rm = TRUE), .groups = "drop") %>%
+    na.omit() %>%
+    ungroup()
+  
+  # Create a self financing portfolio which shorts the stocks with lowest predicted
+  # returns and buys the stocks with the highest predicted return
+  # 10-1 portfolio
+  portfolios_ts_101 <- portfolios_ts %>%
+    filter(portfolio %in% c("1", "10")) %>%
+    pivot_wider(names_from = portfolio,
+                values_from = ret_vw) %>%
+    mutate(ret_vw = `10` - `1`,
+           portfolio = "10-1") %>%
+    select(date, ret_vw)
+  
+  portfolio_strategy <- bind_rows(portfolios_ts, portfolios_ts_101) %>%
+    mutate(portfolio = factor(portfolio, levels = c(as.character(seq(1, 10, 1)), "10-1")))
+
+}
+
+
+en_portfolio <- portfolio_func(predicted_ret_en) 
+rf_portfolio <- portfolio_func(predicted_ret_rf)
+nn1_portfolio <- portfolio_func(predicted_ret_nn1)
+nn2_portfolio <- portfolio_func(predicted_ret_nn2)
+nn3_portfolio <- portfolio_func(predicted_ret_nn3)
+nn4_portfolio <- portfolio_func(predicted_ret_nn4)
+nn5_portfolio <- portfolio_func(predicted_ret_nn5)
+
+
+```
+
+```{r }
+# CAPM
+# estimate capm alpha per portfolio
+market_return <- data %>%
+  filter(.$date %within% interval(ymd("2012-01-01"), ymd("2016-12-01"))) %>% 
+  group_by(date) %>% 
+  summarize(ret_vw_mkt = weighted.mean(ret.adj, mktcap, na.rm = TRUE), .groups = "drop" ) %>% 
+  na.omit() %>%
+  ungroup()
+
+
+
+  portfolio_returns <-  en_portfolio %>% 
+  left_join(market_return, by = "date") %>%
+  left_join(rf_portfolio, by = c("date", "portfolio")) %>%
+  left_join(nn1_portfolio, by = c("date", "portfolio")) %>%
+  left_join(nn2_portfolio, by = c("date", "portfolio")) %>%
+  left_join(nn3_portfolio, by = c("date", "portfolio")) %>%
+  left_join(nn4_portfolio, by = c("date", "portfolio")) %>%
+  left_join(nn5_portfolio, by = c("date", "portfolio")) 
+  
+  
+  colnames(portfolio_returns) <-c("portfolio","date", "ret_en","ret_mkt","ret_rf", "ret_nn1", "ret_nn2", "ret_nn3", "ret_nn4", "ret_nn5")
+
+```
+
+
+
+```{r }
+compute_avg_return <- function(model_ret, mkt_ret){
+  average_ret <- portfolio_returns %>%
+    group_by(portfolio) %>%
+    arrange(date) %>%
+    do(model = lm(paste0(model_ret), data = .)) %>%
+    mutate(nw_stderror = sqrt(diag(sandwich::NeweyWest(model, lag = 6)))) %>%
+    mutate(broom::tidy(model)) %>%
+    ungroup() %>%
+    mutate(nw_tstat = estimate / nw_stderror) %>%
+    select(estimate, nw_tstat) %>%
+    t()
+  
+  average_capm_alpha <- portfolio_returns %>%
+    group_by(portfolio) %>%
+    arrange(date) %>%
+    do(model = lm(paste0(mkt_ret), data = .)) %>%
+    mutate(nw_stderror_capm = sqrt(diag(sandwich::NeweyWest(model, lag = 6))[1])) %>%
+    mutate(estimate_capm = coefficients(model)[1]) %>%
+    mutate(capm_tstat = estimate_capm / nw_stderror_capm) %>%
+    select(estimate_capm, capm_tstat) %>%
+    rename("alpha_en" = estimate_capm) %>%
+    t()
+  
+  out <- rbind(average_ret, average_capm_alpha)
+}
+
+en_out <- compute_avg_return("ret_en ~ 1","ret_en ~ 1 + ret_mkt")
+rf_out <- compute_avg_return("ret_rf ~ 1","ret_rf ~ 1 + ret_mkt")
+nn1_out <- compute_avg_return("ret_nn1 ~ 1","ret_nn1 ~ 1 + ret_mkt")
+nn2_out <- compute_avg_return("ret_nn2 ~ 1","ret_nn2 ~ 1 + ret_mkt")
+nn3_out <- compute_avg_return("ret_nn3 ~ 1","ret_nn3 ~ 1 + ret_mkt")
+nn4_out <- compute_avg_return("ret_nn4 ~ 1","ret_nn4 ~ 1 + ret_mkt")
+nn5_out <- compute_avg_return("ret_nn5 ~ 1","ret_nn5 ~ 1 + ret_mkt")
+```
+
+
+```{r}
+out <- rbind(en_out,rf_out,nn1_out,nn2_out,nn3_out,nn4_out,nn5_out)
+
+colnames(out) <-c(as.character(seq(1, 10, 1)), "10-1")
+rownames(out) <- c("Elastic net", "t-Stat", "Elastic net capm alpha", "t-Stat",
+                   "Random forest", "t-Stat", "Random forest capm alpha", "t-Stat",
+                   "NN1", "t-Stat", "NN1 capm alpha", "t-Stat",
+                   "NN2", "t-Stat", "NN2 capm alpha", "t-Stat",
+                   "NN3", "t-Stat", "NN3 capm alpha", "t-Stat",
+                   "NN4", "t-Stat", "NN4 capm alpha", "t-Stat",
+                   "NN5", "t-Stat", "NN5 capm alpha", "t-Stat")
+
+out %>% knitr::kable(digits = 2, "pipe")
+
+
+```
+
+
+```{r }
+end_time <- Sys.time()
+total_comp <- end_time - start_time
+```
+
+
+
+```{r }
+
+```
+
+```{r }
+
+```
+
+```{r}
+
+average_ret_en <- portfolio_returns %>%
+  group_by(portfolio) %>%
+  arrange(date) %>%
+  do(model = lm(paste0("ret_en ~ 1"), data = .)) %>%
+  mutate(nw_stderror = sqrt(diag(sandwich::NeweyWest(model, lag = 6)))) %>%
+  mutate(broom::tidy(model)) %>%
+  ungroup() %>%
+  mutate(nw_tstat = estimate / nw_stderror) %>%
+  select(estimate, nw_tstat) %>%
+  t()
+
+
+```
+
+```{r}
+average_capm_alpha_en <- portfolio_returns %>%
+  group_by(portfolio) %>%
+  arrange(date) %>%
+  do(model = lm(paste0("ret_en ~ 1 + ret_mkt"), data = .)) %>%
+  mutate(nw_stderror = sqrt(diag(sandwich::NeweyWest(model, lag = 6))[1])) %>%
+  mutate(estimate = coefficients(model)[1]) %>%
+  mutate(nw_tstat_en = estimate / nw_stderror) %>%
+  select(estimate, nw_tstat_en) %>%
+  rename("alpha_en" = estimate) %>% 
+  t()
+
+```
