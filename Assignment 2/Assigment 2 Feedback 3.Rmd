@@ -1,0 +1,391 @@
+---
+title: "Mandatory Assignment 2"
+author: "Niels Nygreen Bonke and Johan Kielgast Ladelund"
+date: '2022-04-07'
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(fig.width = 6, fig.height = 3) # Graph size
+knitr::opts_chunk$set(fig.align = "center", fig.pos = "H") # Graph placement/location
+
+
+
+library(tidyverse)
+library(RSQLite)
+library(kableExtra)
+library(tidymodels)
+library(tinytex)
+library(tensorflow)
+library(lubridate)
+library(keras)
+library(timetk)
+library(furrr)
+library(glmnet)
+library(broom)
+library(scales)
+library(hardhat)
+```
+
+$$\textbf{Question 1}$$
+Based on Figure 5 and Table 4 in (Gu et al, 2020), we choose the following characteristics and macro variables (we refer to (Gu et al, 2020) for definitions of the variables):
+
+* **Characteristics:** `mom1m`, `mvel1`, `mom12m`, `chmom`, `maxret`
+* **Macro variables:** `bm`, `dfy`, `ntis`, `tbl`
+* **Other variables:** `permno`, `month`, `ret_excess`, `mktcap_lag`, `sic2`
+
+These variables are chosen as they appear to be the most relevant variables across all the models used in (Gu et al, 2020). Interestingly, `dfy` seems to be very important for all models except the Neural Networks (NNs). We are eager to find whether our analysis replicates this discrepancy. Further, it might be include both momentum (`mom12m`) and momentum change (`chmom`), but from table 5 of (Gu et al, 2020) it seems that both these variables are simultaneously important across all the models.
+
+```{r, cache=TRUE}
+tidy_finance <- dbConnect(SQLite(), "data/tidy_finance_ML.sqlite", 
+                          extended_types = TRUE)
+
+
+# Download data and select at the same time 
+data <- tbl(tidy_finance, "stock_characteristics_monthly") %>% 
+  select(permno:sic2, #These are the "mandatory" variables
+         characteristic_mom1m, characteristic_mvel1,  #Choose 5 characteristics
+         characteristic_mom12m, characteristic_chmom, characteristic_maxret,
+         macro_bm, macro_dfy, macro_ntis, macro_tbl#Choose 4 macroeconomic variables
+         ) %>%
+  collect() #Collect only AFTER variable selection to save some RAM
+
+# Remove all observations prior to January 1st, 2005 
+data <- data %>%
+  drop_na(sic2) %>%
+  filter(month >= "2005-01-01") %>%
+  arrange(month)
+
+# Disconnect to avoid warning
+dbDisconnect(tidy_finance)
+```
+
+
+From the below graph and table, we see that the number of stocks has been steadily declining. Specifically, we see that the decline in number of stocks is from 4789 to 2939 stocks. 
+
+```{r}
+data %>%
+  group_by(month) %>%
+  summarise(n = n_distinct(permno)) %>%
+  ungroup() %>%
+  summarise("Avgerage" = mean(n),
+            "Std. dev." = sd(n),
+            "Min" = min(n),
+            "Max" = max(n)
+            ) %>%
+  knitr::kable(digits = 0, 
+               caption = "Summary statistics of the number of stocks (monthly data)"
+              ) %>%
+  kable_styling(latex_options = "hold_position") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+```{r}
+data %>%
+  group_by(month) %>%
+  summarise(n = n()) %>% arrange(desc(month)) %>%
+  ggplot(aes(x = month, y = n)) +
+  geom_line() +
+  labs(title = "Number of stocks in our sample. Janurary 2005 - November 2020.",
+       x = "",
+       y = "Number of stocks") 
+```
+
+As for the macro-economic variables, we provide the following summary statistics:
+```{r}
+data %>% 
+  distinct(month, .keep_all = TRUE) %>%
+  select(month, starts_with("macro")) %>%
+  pivot_longer(-month,
+               names_to = "Variable"
+               ) %>%
+  mutate("Variable" = case_when(Variable == "macro_bm" ~ "Book-to-market ratio",
+                                      Variable == "macro_dfy" ~ "Default spread",
+                                      Variable == "macro_ntis" ~ "Net equity expansion",
+                                      Variable == "macro_tbl" ~ "Treasury-bill rate"
+                                      )
+         ) %>%
+  group_by(Variable) %>%
+  summarise(Min = min (value),
+            Median = quantile(value, prob = 0.5),
+            Mean = mean(value),
+            Max = max(value),
+            "Standard deviation" = sd(value)
+            ) %>%
+  knitr::kable(digits = 4, 
+               caption = "Summary statistics of the included macro variable (monthly data)"
+              ) %>%
+  kable_styling(latex_options = "hold_position") %>%
+  kable_classic(full_width = F, 
+                html_font = "Cambria"
+                )
+
+
+```
+
+
+
+```{r}
+#Before makeing the recipe, we turn sic2 into a factor so that we can use `step_dummy` on it:
+data <- data %>%
+  mutate(sic2 = as.factor(sic2))
+```
+Finally, we make the the following recipe:
+<!-- KAN DET VIRKELIG PASSE, AT VI IKKE STANDARDISERER VARIABLENE?? -->
+```{r, echo=TRUE}
+rec <- recipe(ret_excess ~ ., data = data ) %>%
+  step_rm(month, permno) %>% #Remove Month --> not a feasible predictor
+  step_interact(terms = ~ contains("characteristic"):contains("macro")) %>% #Interactions
+  step_dummy(sic2, one_hot = TRUE) %>% #One_hot=TRUE --> no reference category (dummy trap)
+  step_normalize(all_predictors()) %>%
+  step_center(ret_excess, skip = TRUE)
+```
+
+```{r}
+#Use the below lines to check what our recipe actually does to the data
+prep <- rec %>% prep(training = data)
+bake <- bake(prep, new_data = NULL)
+bake
+```
+
+
+$$\textbf{Question 2}$$
+
+The linear factor model may be seen as on possible specification of an Arbitrage Pricing Theory (APT) model. In the APT framework, $z_{i,t}$ should be matrix consisting selected *factors* that we consider important in explaining the the stock returns. These will typically be portfolios (often times self-financing) which we belive the correlate significantly with the average stock return. If we, for instance, take inspiration from the [Fama-French three factor model]{https://bit.ly/3xgs5dF} and look at factors such as `Market (Mkt)`, `Small-minus-big (SMB)`, and `High-minus-low (HML)`, the functional form of $g(\cdot)$ would be
+$$g(z_{i,t}) = \beta_i^{Mkt} E_t(r_{Mkt}-r_f) + \beta^{SMB}_i E_t(r_{SMB}) + \beta_i^{HML} E_t(r_{HML})$$
+where we subtract the the risk free rate, `r_f`, only from the Market return, as the other two portfolios are typically defined in a self-financing manner. Note that one may     add t-subscripts to the beta-parameters in order to make these time-variant. Hence $z_{i,t}= (r_{Mkt}-r_f \quad r_SMB \quad r_HML)'$.
+
+
+
+$$\textbf{Question 3}$$
+Hyperparameters (or tunings parameters) are parameters which values determines and controls the learning process/model complexity in a Machine Learning (ML) algorithm. Examples of hyperparameters could be the number of random trees in a forest or the train-test split ratio. Since these are crucial factors of the learning outcome of the algorithm, they must be chosen according to the objective. In our case the objective is to maximize out-of-sample (OOS) performance, and hence we should perform hyperparameter tuning according to minimizing the discrepancy between predicted OOS and actual returns.
+
+As explained by Gu et al (2020) this can be done by splitting the full data set in to three different chronologically ascending parts: a training sample, a validation sample and a test sample.
+
+The training sample estimates the chosen model subject to a constraint that the hyperparameters are given by some specific values, i.e. best guesses for initial values. Subsequently the validation sample tunes the hyperparameters by first producing forecasts for the validation sample, using the parameters estimated in the test sample, and then compute the values for a specific objective function (e.g. associated with SLS, WLS, elastic net, PCR, PLS or NNs) using the forecast errors. These first two steps are repeated a large number of times for different hyperparameter values (i.e. a random or grid search is applied), and hence the model is iteratively re-estimated to find the hyperparameter values that induces the estimation of the model parameters with the smallest forecast errors (using a loss function like (R)MSE, MAE or QLIKE) in relation to the objective function.
+At last the test sample is used to perform OOS performance testing of the model with the optimal hyperparameters chosen and the remaining model parameters as estimated in the training sample.
+
+Generally if one estimates (trains) the model on the entire data set, the possibility to tune model hyperparameters and evaluate actual OOS performance is lost. The trade-off is the fact that in general (or to a certain extent) more data can increase the accuracy or fit of the model. However, if one intends to evaluate OOS forecasting performance it is unwise not to leave at least some part of the data set to validation and testing.
+
+Another risk - that is also impacted by the choice of objective function - is the risk associated with either over- or underfitting the model. That is to either fit the model so well to the training sample that it performs poorly when forecasting OOS because dynamics might be slightly different (overfitting) or to not fit the model well enough (for example due to the risk of overfitting) such that it neither performs well e.g. in an in-sample forecast nor an OOS forecast (underfitting). In accordance with Gu et al (2020) we note that linear models (OLS, WLS) are at risk of overfitting noise in the training sample, why we might choose objective function that are not (only) linear (e.g. elastic net, PCR, PLS, NNs).
+
+
+One simple alternative to performing hyperparameter tuning could be instead to use the default hyperparameter settings which are chosen to fit most models moderately well. This would free-up more data for training and testing the model, by not allocating a portion of the data set solely to tuning hyperparameters.
+
+We now split our data set into the training, validation and test samples, where the latter is assigned 20% of our total data set. We choose to use 75% of the remaining data to train our model and 25% for hyperparameter tuning (i.e. validation) - hence the actual splits are 60-20-20. We choose these fractions since it is our understanding that they are duly considered by the literature on the axis from underfitting to overfitting, as explained previously.  
+```{r}
+# Creating the initial 80-20 sample split between training & validation and testing
+datasplit <- initial_time_split(data, prop = 4/5)
+learning <- training(datasplit)
+testing_sample <- testing(datasplit)
+
+# Creating the subsequent 75-25 sample split between training and validation
+learning_data <- initial_time_split(learning, prop = 3/4)
+training_sample <- training(learning_data)
+validation_sample <- testing(learning_data)
+
+# Illustrating the exact empirical datasplits in a table
+fraction <- matrix(cbind(nrow(training_sample)/nrow(data)*100, 
+    nrow(validation_sample)/nrow(data)*100, 
+    nrow(testing_sample)/nrow(data)*100,
+    nrow(training_sample), nrow(validation_sample), nrow(testing_sample)), ncol=3, byrow=TRUE)
+colnames(fraction) <- c('Training sample', 'Validation sample', 'Testing sample')
+rownames(fraction) <- c('% of total dataset', 'Number of data points')
+fraction %>%
+  knitr::kable(digits = 0, 
+               caption = "Summary statistics of the number of stocks (monthly data)"
+              ) %>%
+  kable_styling(latex_options = "hold_position") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+
+```
+$$\textbf{Question 4}$$
+We now choose two machine learning methods to proceed with in the analysis of excess return prediction. We choose the elastic net and neural network methods. We do this to explore both one fully transparent yet possibly less successful method (i.e. elastic net) and one opaque and at times "black-box"-like yet very accurate and widely used method (i.e. neural network).
+
+
+
+$$\text{Elastic Net}$$
+
+Elastic Net (ENet) is a hybrid of the Ridge and Lasso regressions. Both the Lasso and Ridge regressions involve shrinkage factors, where the former penalizes the sum of the absolute value of the weights in the regression, and the latter penalizes the sum of the squared value of the weights. To reap the benefits of both methods (including the higher penalization of extreme values in the Ridge regression i.a.) we use ENet. The ENet penalty function is literally a linear combination of the Lasso and Ridge regressions, where $\rho=0$, in the following, is equivalent to the Lasso penalty function and $\rho=1$ to the Ridge penalty function:
+$$\hat{\beta}^{ENet}=\text{arg min }(Y-X\beta)'(Y-X\beta)+\lambda(1-\rho)\sum_{j=1} ^ P |\beta_j| + \frac{1}{2}\lambda\rho \sum_{j=1}^P \beta_j ^2$$
+
+We now set up and fit the model using the elastic net method on the training sample, and specify some initial guesses for the optimal $\lambda$ and $\rho$. These are not crucial since we will optimize them with hyper parameter tuning subsequently. Next we tune the model hyperparameters by forecasting the validation sample created previously and evaluating Mean Squared Prediction Errors (MSPE)
+```{r}
+ENet_model <- linear_reg(
+  penalty = 0.0001, 
+  mixture = 0.5 #mixture=0.5 implies that weights are 0.5 on both Ridge and Lasso (this will be optimized with tuning later on)
+) %>%
+  set_engine("glmnet", intercept = FALSE)
+
+ENet_fit <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(ENet_model)
+```
+
+Next we tune the model hyperparameters by forecasting the validation sample created previously and evaluating Mean Squared Prediction Errors (MSPE)
+```{r}
+# Amending the model so that the penalty (lambda) and mixture (rho) parameters can be optimized
+ENet_model <- linear_reg(
+  penalty = tune(),
+  mixture = tune()
+) %>%
+  set_engine("glmnet", intercept = FALSE)
+
+# Assigning a command to update the model when fitting
+ENet_fit <- ENet_fit %>%
+  update_model(ENet_model)
+
+# Computing the specified training and validation sample fractions as months
+elapsed_months <- learning %>%
+  distinct(month)
+train_months <- (nrow(elapsed_months))*0.75
+val_months <- (nrow(elapsed_months))*0.25
+tibble(train_months, val_months)
+```
+***FORKLAR HVORFOR VI VÆLGER INITIAL OG ASSES TIL AT VÆRE ROLLING WINDOW***!!!!!!!!!!!!!!!!
+#"Question 3 is the correct space in the report to reflect on proper ways to do hyperparameter selection"
+```{r, cache = TRUE}
+# Defining the tuning process, using the time series cross validation function
+data_folds <- time_series_cv(
+  data = learning, #Notice that we choose the learning sample containing both training and validation, this is because we are forced to specify 'initial' and 'assess' which are the periods for which the model should be estimated and validated with different hyperparameters respectively
+  date_var = month,
+  initial = "60 months",
+  assess = "36 months",
+  cumulative = FALSE,
+  skip = 6,
+  slice_limit = 20 #initial=60 months, asses=36 months and skip=6 this limit is not bounding
+)
+
+# Tuning the model
+ENet_tune <- ENet_fit %>%
+  tune_grid(
+    resample = data_folds,
+    grid = grid_regular(penalty(),mixture(), levels = c(30, 3)),
+    metrics = metric_set(rmse)
+  )
+
+# See the Regularization v. RMSPE by running the code below
+autoplot(ENet_tune) + labs(y = "Root mean-squared prediction error", title="MSPE for Manufacturing excess returns",
+                           subtitle = "Lasso (1.0), Ridge (0.0), Elastic Net (0.5) with different levels of regularization")
+
+
+```
+
+We have limited the ENet to only have 3 different candidate values ($\rho\in\{0, 0.5, 1\}$) in order to accommodate our limited computational power. However, a more finely meshed grid would have been preferable. 
+
+
+$$\text{Neural Network}$$
+
+Neural networks is one of the (if not the) most dominant method in ML. Gu et al (2020) emphasizes that besides being widely used, it is also the preferred method to use in complex ML problems, including i.a. the computer science branch of Natural Language Processing (NLP). One drawback of this method (as we will come to see) is that it is much less obvious and more opaque, exactly what is going on in the computational parts of the method (i.e specific parts of the network).
+
+We use the feed-forward neural network that is composed of an input layer, hidden layers and and output layer.
+
+The input layer consists of the first set of so-called "neurons" in the network. It is in this stage that the raw data is brought into the system. Gu et al (2020) refers to this layers as consisting of "raw predictors"
+
+The hidden layer(s) is the second (third, fourth and so on) layer(s) of neurons in the network. It is in these interactive layers that the computation is performed, and hence where the "raw predictors" are altered. This is done such that each neuron in each hidden layer in the network uses a so-called "activation function" that decides whether or not the neuron in the specific layer should be activated. This is done prior to sending its output to the next hidden layer of neurons. Hence the objective function is generally used to determine whether or not the specific neuron's input to the network is important for predictions. 
+
+
+Finally there is the output layer, which is the last set of neurons in the network. It is here that the chain of interaction between the hidden layers is collected to a single set of predictions. We note that while the outputlayer might also use an activation function, it is ofen times a different one than that of the hidden layers, depending on the required prediction outcome 
+
+Gu et al (2020) describes the various important choices that should be made before creating a neural network. These i.a. include choosing the number of hidden layers and the number of neurons. We rely on the fact that when having to do with less complex data sets such as ours, one hidden layer is typically enough. Hence we choose to set up the model with a single hidden layer.
+```{r, cache = TRUE}
+# Setting up the single hidden layer feed-forward NN
+nn1_model <- mlp(
+  epochs = 1, #Inspired på Gu et al (2020)
+  hidden_units = 20) %>%
+  set_mode("regression") %>%
+  set_engine("keras", verbose = 0) #we use verbose = 0 to prevent R from logging results
+
+# Fitting the model
+nn1_fit <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(nn1_model) %>%
+  fit(data = training_sample)
+
+# Defining the 2 hidden layer NN
+nn2 <- keras_model_sequential() %>%
+  layer_dense(units = 10, activation = "sigmoid", input_shape = ncol(bake)-1) %>%
+  layer_dense(units = 5, activation = "sigmoid") %>%
+  layer_dense(units = 1, activation = "linear") %>%
+  compile(
+    loss = "mean_absolute_error"
+  )
+
+# Fitting the 2 hidden layer NN
+nn2 %>%
+  fit(
+    x = extract_mold(nn1_fit)$predictors %>% as.matrix(),
+    y = extract_mold(nn1_fit)$outcomes %>% pull(ret_excess),
+    epochs = 10, verbose = 0
+  )
+```
+
+$$\text{Table }\text{A.5}$$
+The table below describes the hyperparameters used in the ENet and NN1 model. Throughout our tuning regimes we choose the hyperparameters that yields the lowest RMSPE (or equivalently MSPE).
+
+```{r}
+Table_A5 <- matrix(cbind("$\\checkmark$", "$\\checkmark$", "$\\lambda\\in[10^{-10},1]$", "$\\lambda\\in[10^{-10},1]$", "$\\rho\\in\\{0,0.5,1\\}$", "-",'Data folds = 1','Epochs = 100,$\\text{ }$ Hidden units = 20'), ncol=2, byrow=TRUE)
+colnames(Table_A5) <- c('ENet', 'NN1')
+rownames(Table_A5) <- c('MSPE', 'L1 (lambda)', 'L2 (rho)', 'Others')
+Table_A5 %>%
+  knitr::kable(digits = 0, 
+               caption = "Hyperparameters for both models"
+              ) %>%
+  kable_styling(latex_options = "hold_position") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+
+
+$$\textbf{Question 5}$$
+
+<!-- We now fit the ENet model with the optimal hyperparameters, forecast returns for the testing sample  -->
+```{r}
+# Assigning the optimal hyperparameters to the ENet model
+ENet_model <- linear_reg(
+  penalty = 0.0001, 
+  mixture = 0.5
+) %>%
+  set_engine("glmnet", intercept = FALSE)
+
+# Fitting the model
+ENet_fit <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(ENet_model) %>%
+  fit(data = learning)
+
+# Forecasting returns for the testing sample
+ENet_prediction <- ENet_fit %>% 
+  predict(testing_sample) %>%
+  cbind(testing_sample %>% 
+  select(month, permno, ret_excess))
+```
+
+
+<!-- Next we do the same for the NN2 model -->
+```{r}
+NN2_prediction <- nn2 %>%
+  predict(forge(testing_sample, extract_mold(nn1_fit)$blueprint)$predictors %>%as.matrix()) %>%
+  tibble()%>%
+  cbind(testing_sample %>%
+  select(month, permno, ret_excess))
+names(NN2_prediction)[1] <- ".pred"
+```
+
+In the figure below we have evaluated return predictions for the long-short portfolio predicted by the tuned ENet and NN2 models as described in the question.
+We observe that our NN2 models performs best in terms of predicting returns. This might be why it's preferred over most oster ML methods. It is however very opaque exactly what is going on in the two hidden layers, aside from the fact that we know the activation function applied. 
+
+<!-- Finally we split the return predictions for the permnos into 10 deciles, and evaluate long-short portfolios for the two methods -->
+```{r}
+#Plot and decile portfolios computed
+```
+
+At last we compare the results inside the CAPM framework by computing $\alpha$'s of the long short portfolios produced by each model. 
+
+<!-- Computing CAPM alphas and betas  -->
+```{r}
+#CAPM stats computed
+```
+
+
+
