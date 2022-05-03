@@ -1,0 +1,361 @@
+---
+title: "Mandatory Assignment 2"
+output:
+   pdf_document:
+    latex_engine: xelatex
+---
+**Starting note**
+As I struggled with some of the exercises, and my codes did not work, I have removed my trial attempts, since one of the requirements is that there must be no errors or interruptions when running the codes. I would really appreciate tips and hints to solve the exercises I didn't manage to solve. (This section will of course be removed when I revisit the assignment after the peer feedback). Furthermore, the random_forest is not tuned, as the code took forever to run. If you have any suggestions, feel free to give hints here as well.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#Packages used in Mandatory Assignment 2
+library(tidyverse)
+library(RSQLite)
+library(slider)
+library(scales)
+library(furrr)
+library(lubridate)
+library(sandwich)
+library(lmtest)
+#library(texreg)
+library(stats)
+library(kableExtra)
+library(glmnet)
+library(base)
+library(forecast)
+#library(cowplot)
+#library(float)
+library(ggplot2)
+library(tidymodels)
+library(timetk)
+library(recipes)
+library(keras)
+library(hardhat)
+library(tensorflow)
+library(parsnip)
+library(ranger)
+#library(ggpubr)
+```
+
+**Exercise 1**
+The data used in the mandatory assignment is the Fidy_Finance_ML SQL database containg the predictors from *Empirical Asset Pricing with Machine Learning* and macroeconomic predictors from Goyal Welsh Homepage. The variables used in this assignment are 5 stock characteristics: 1-month momentum (mom1m), 12-month momentum (mom12m), share turnover (turn), return volatility (retvol), and change in 6-month momentum (chmom) , the 4 macroeconomic variables: Net Equity Expansion (macro_ntis), Treasury-bill rate (macro_tbl), book-to-market ratio (macro_bm), and dividend-price ratio (macro_dp), and the stock identifier (permno), the month states year-month-date (month), the excess returns (ret_excess), the lagged market capitalization (mkt_cap), and industry classifications (sic2).  
+The 5 stock characteristics are chosen based on *figure 4: Variable importance by model* and *figure 5: Characteristic importance*. Momentum is one of the characteristics, that is important in the models. To capture both short term, medium-term, and long-term momentum, both 1-month momentum, change in 6-month momentum and 12-month momentum is included. Furthermore, the share turnover and return volatility is chosen as the two last characteristics.  
+The 4 macroeconomic variables are chosen based on *table 4: Variable importance for macroeconomic predictors*, where the variable importance is measured. Looking at the graph to table 4, book-to-market ratio have high importance in each model used in *Empirical Asset Pricing with Machine Learning*. The Treasury-bill rate is chosen such that we have a proxy for the risk-free rate in the dataset. The fourth variable, dividend-price ratio, is the difference between dividends and prices, both in logs. It was chosen as the fourth variable to have some price related variable in the dataset. The net equity expansion is chosen due to its high importance in the random forest model.  
+
+In the figure below, the summary statistics are presented:  
+```{r echo=FALSE}
+#loading the data
+#remember to set the working direction
+tidy_finance_ML <- dbConnect(SQLite(), "data/tidy_finance_ML.sqlite", extended_types = TRUE)
+data <- tbl(tidy_finance_ML, "stock_characteristics_monthly") %>% select(permno:sic2, characteristic_mom1m, characteristic_mom12m, characteristic_turn, characteristic_retvol, characteristic_chmom, macro_dp, macro_ntis, macro_tbl, macro_bm) %>% collect() 
+
+data <- data %>% drop_na(sic2) %>% filter(month >= "2005-01-01") %>% arrange(month, permno)
+
+data.summary <- data %>% select(permno:characteristic_chmom)
+
+kable(summary(data.summary), booktabs = T, digits = 4, caption = "Table 1: Summary statistics") %>%  kable_classic(full_width = F, html_font = "Cambria") %>% kable_styling(latex_options = "HOLD_position")
+
+data <- data%>% mutate(sic2 = as.factor(sic2))
+```
+As seen in the summary output of table 1, the mean of the excess returns and the market capitalization are 0.007 and 4908.7, respectively. Further, the summary statistic shows sign of skewness, as the average excess return and the average market capitalization are greater than the median of the excess return and market capitalization. This is often seen in financial data. Hence, this will not be investigated further in this assignment. The mean of 1-month momentum and 12-month momentum are -0.003 and -0.01, respectively, which indicates both short-term and long-term reversal effect. The mean of share turnover is 0.04, and the average return volatility is 0.128. The mean of the change in 6-month momentum is slightly negative.  
+The dataset also contains 4 macroeconomic predictors, which is illustrated in Figure 1 - 4.  
+```{r echo=FALSE}
+#Illustrations of the macroeconomic predictors
+x <- "Year"
+
+plot <- data %>% group_by(month) %>% ggplot() + 
+  geom_line(aes(x = month, y = macro_dp)) + 
+  xlab(x) +
+  ylab("Dividend-price ratio") + ggtitle("Figure 1: Dividend-price ratio")+ theme_minimal()
+
+plot1 <- data %>% ggplot() + 
+  geom_line(aes(x = month, y = macro_tbl)) +
+  xlab(x) +
+  ylab("Treasury-bill rate") + ggtitle("Figure 2: Treasury-bill rate") + theme_minimal()
+
+plot2 <- data %>% group_by(month) %>% ggplot() + 
+  geom_line(aes(x = month, y = macro_ntis)) + 
+  xlab(x) +
+  ylab("Net equity expansion") + ggtitle("Figure 3: Net equity expansion") + theme_minimal()
+
+plot3 <- data %>% group_by(month) %>% ggplot() + 
+  geom_line(aes(x = month, y = macro_bm)) + 
+  xlab(x) +
+  ylab("book-to-market ratio") + ggtitle("Figure 4: Book-to-market ratio") + theme_minimal()
+
+
+
+ggarrange(plot, plot1, plot2, plot3 + rremove("x.text"), ncol = 2, nrow = 2)
+```
+Figure 1 shows the dividend-price ratio from 2005 to 2020. As the graph shows, the dividend-price ratio increased sharply during the financial crisis, but remained negative throughout the period. Figure 2 shows the Treasury-bill rate from 2005 to 2020, which increases in the first years until about 2008, where it decreases until the middle of 2015. It then increases again until the last part of 2019, where it takes a dive. Figure 3 shows the net equity expansion, which fluctuates throughout the period with a large decrease after 2007 followed by a increase in around 2009. Figure 4 shows the book-to-market ratio, which fluctuates throughout the period with a downward trend beyond around 2010, where it takes a dive.  
+
+Before we start working with the data, two further cleaning steps will be performed. In the recipe code, all interactions between the 5 stock characteristics and the 4 macroeconomic variables are created, and dummies for the variable sic2 will be implemented in the dataset.
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#making a recipe with interactions and dummies
+rec <- recipe(ret_excess ~., data = data) %>% 
+  step_rm(month) %>% 
+  step_interact(terms = ~ contains("characteristic"):contains("macro")) %>% 
+  step_dummy(sic2, one_hot = TRUE)
+
+tmp_data1 <- bake(prep(rec, data), new_data = NULL)
+```
+
+**Exercise 2**
+In Gu, Kelly and Xiu (2020), an asset's excess return is described as an additive prediction error model:
+$$r_{i,t+1}=E_{t}(r_{i,t+1})+\varepsilon_{i,t+1}$$
+where
+$$E_{t}(r_{i,t+1})=g(z_{i,t})$$
+One of the limitations of this modeling approach is, that the function $g(z_{i,t})$ does not depend on $i$ or $t$, which means that the function maintains the same form for different stocks and months. This is in direct conflict with standard asset pricing approaches. Furthermore, $g(z_{i,t})$ does not use information prior to $t$ or for other stocks than $i$.
+
+**Exercise 3**
+The purpose of hyperparameter tuning is to make sure, that the model does not overfit. A limitation/concern with hyperparameter tuning is that there is limit theoretical guidance on how to perform the hyperparameter tuning.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#splitting the data into a training and testing 
+split_data <- initial_time_split(
+  data, 
+  prop = 4/5)
+split_data_learning <- training(split_data)
+split_data_testing <- testing(split_data)
+
+tmp_data <- bake(prep(rec, split_data_learning), new_data = split_data_testing)
+```
+
+The data is splitted into a training and a testing subsample. where the most recent 20% of the observations will be used for the out-of-sample testing (the testing sample). For the remaining 80% of the sample (the training sample), 60% of the sample goes to the training set and the last 20% of the sample goes to the validation set in the report. The training and the testing subsamples have 595,270 and 148,818 observations, respectively.  
+
+**Exercise 4**
+In this assignment, the random forests and elastic net is implemented.
+Random forests: Random forests are a further development of the decision trees that addresses the shortcoming for example the high variance in decision trees. Random forests work by creating multiple decision trees and take the average of the predictions. Bootstrapping is used to induce randomness by assuring that the trees are not similar. Using the training sample, $B$ decision trees are created, where features are randomly selected for each tree. The prediction of each observation is computed as:
+$$\hat{y}=\frac{1}{B}\sum_{i=1}^{B}\hat{y}_{T_{i}}$$
+In the hyperparameter tuning, the number of trees and the observations in each branch are generated to give the smallest possible mean square error (MSE).
+
+Elastic net: The elastic net combines $L_{1}$ with $L_{2}$ penalization. The general framework considers the optimization problem:
+$$\hat{\beta}^{EN}=arg min_{\beta}(Y-X\beta)'(Y-X\beta)+\lambda(1-\rho) \sum_{k=1}^{K} |\beta_{k}|+\frac{1}{2}\lambda\rho\sum_{k=1}^{K} \beta_{k}^2$$
+For the elastic net, two parameters has to be chosen, $\lambda$ and $\rho$, the shrinkage factor and the weighting parameter. In the tuning part, this are the two parameters, we have to find the optimal value of. The optimal value of $\lambda$ and $\rho$ is the ones, that minimizes the root mean square error (rmse). The elastic net will be implemented with the *glmnet* package.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+#cross-validation folds based on the training data
+data_folds <- time_series_cv(
+  data        = split_data_learning,
+  date_var    = month,
+  initial     = "5 years",
+  assess      = "48 months",
+  cumulative  = FALSE,
+  slice_limit = 20
+)
+```
+
+First, the random forest is computed with 50 trees and at least 20 observations in each node. As my code for the hyperparameter tuning did not work, I kept the model with 50 trees and at least 20 observations in each node. Random forest delivers a MSE of 0.025. Table 2 shows the first 6 observation of the random forest, which will be used in exercise 5.
+```{r echo=FALSE}
+#Random forest
+rf_model <- rand_forest(
+  trees = 50,
+  min_n = 20
+) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+
+
+rf_fit <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(rf_model) %>%
+  fit(data = split_data_learning)
+```
+
+```{r echo=FALSE}
+random_forest_model <- rf_fit %>%
+  predict(split_data_testing) %>%
+  bind_cols(split_data_testing) %>%
+  select(permno, month, .pred, ret_excess, mktcap_lag)
+kable(head(random_forest_model), booktabs = T, digits = 4, caption = "Table 2: Head of Random Forest") %>%  kable_classic(full_width = F, html_font = "Cambria") %>% kable_styling(latex_options = "HOLD_position")
+```
+
+The other method used in this assignment is the elastic net. The parameters $\lambda$ and $\rho$ is tuned in the elastic net with a 20-fold cross-validation and a $10 * 3$ hyperparameters grid. Table 3 shows the optimal values of $\lambda$ and $\rho$, which delivers the lowest RMSE. The optimal value of $\lambda$ is 0.006 and 0 for $\rho$. Thus, the optimal model is Elastic net (0.006). Table 4 shows the first 6 observation of the elastic net, which will be used in exercise 5.
+
+```{r echo=FALSE}
+lm_model <- linear_reg(
+  penalty = tune(),
+  mixture = tune()
+) %>%
+  set_engine("glmnet")
+
+lm_fit <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(lm_model)
+
+lm_tune <- lm_fit %>%
+  tune_grid(
+    resample = data_folds,
+    grid = grid_regular(penalty(), mixture(), levels = c(10, 3)),
+    metrics = metric_set(rmse)
+  )
+
+lowest_rmse <- lm_tune %>% select_by_one_std_err("rmse")
+
+lm_model1 <- linear_reg(
+  penalty = lowest_rmse$penalty,
+  mixture = lowest_rmse$mixture
+) %>%
+  set_engine("glmnet", intercept = FALSE)
+
+lm_fit1 <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(lm_model1) %>%
+  fit(data = training(split_data))
+
+Elastic_net <- lm_fit1 %>%
+  predict(split_data_testing) %>%
+  bind_cols(split_data_testing) %>%
+  select(permno, month, .pred, ret_excess, mktcap_lag)
+
+kable(lowest_rmse, booktabs = T, digits = 4, caption = "Table 3: Lowest RMSE for the Elastic net") %>%  kable_classic(full_width = F, html_font = "Cambria") %>% kable_styling(latex_options = "HOLD_position")
+kable(head(Elastic_net), booktabs = T, digits = 4, caption = "Table 4: Head of Elastic Net (0.006)") %>%  kable_classic(full_width = F, html_font = "Cambria") %>% kable_styling(latex_options = "HOLD_position")
+```
+
+```{r echo=FALSE}
+#This couldn't run - if you have any ideas how to get it to work, please let me know :)
+#folds_5 <- vfold_cv(split_data_learning, v=5, repeats = 2)
+
+#rf_model1 <- rand_forest(
+#  mtry = tune(),
+#  trees = 100,
+#  min_n = tune()) %>%
+#  set_engine("ranger") %>%
+#  set_mode("regression")
+
+
+#rf_fit1 <- workflow() %>%
+#  add_recipe(rec) %>%
+#  add_model(rf_model1)
+
+#rf_tune <- rf_fit1 %>% tune_grid(
+#  resample = folds_5,
+#  grid = expand.grid(
+#    mtry = c(1, 3, 5),
+#    min_n = c(10, 20, 30)),
+#  metrics = metric_set(rmse))
+
+#lowest_rmse_rf <- rf_tune %>% select_by_one_std_err("rmse")
+
+```
+**Exercise 5**
+Using the random forest and elastic net from the previous exercise, machine learning portfolios are created. Using the predicted excess return as the sorting variable. The period breakpoints are the deciles of the predicted excess returns from the two models. The output of the portfolio sorting is the value-weighted monthly excess returns for each decile portfolio. Creating the long-short portfolio as in Gu, Kelly and Xiu (2020), where thw lowest decile is shorted and we go long in the highest decile. Figure 5 shows the results of the two long-short strategies based on random forest and elastic net.
+```{r echo=FALSE}
+#loading the market excess
+tidy_finance <- dbConnect(SQLite(), "data/tidy_finance.sqlite", extended_types = TRUE)
+factors_ff_monthly <- tbl(tidy_finance, "factors_ff_monthly") %>% collect()
+
+#this code assign the stock into different portfolios, creates the periodic breakpoints.
+#In this way, changes in numbers of portfolio sorts, and the variable used to sort into
+#the n portfolios can easliy be changed
+assign_portfolio <- function(data, var, n_portfolios) {
+  breakpoints <- data %>%
+    summarize(breakpoint = quantile({{ var }},
+      probs = seq(0, 1, length.out = n_portfolios + 1),
+      na.rm = TRUE
+    )) %>%
+    pull(breakpoint) %>%
+    as.numeric()
+
+  data %>%
+    mutate(portfolio = findInterval({{ var }},
+      breakpoints,
+      all.inside = TRUE
+    )) %>%
+    pull(portfolio)
+}
+
+```
+
+```{r echo=FALSE}
+#This code creates the 10 portfolios sorted by the predicted returns, the output of this code is the value-weighted excess returns.
+
+#Random Forest
+sorting_rf <- random_forest_model %>%
+  group_by(month) %>%
+  mutate(
+    portfolio = assign_portfolio(
+      data = cur_data(),
+      var = .pred,
+      n_portfolios = 10
+    ),
+    portfolio = as.factor(portfolio)
+  )%>%  group_by(portfolio, month) %>% summarize(Excess_return = weighted.mean(ret_excess, mktcap_lag), .groups = "drop")
+
+rf_portfolios_summary <- sorting_rf %>%
+  dplyr::left_join(factors_ff_monthly, by = "month") %>%
+  group_by(portfolio) %>%
+  summarise(
+    alpha = as.numeric(lm(Excess_return ~ 1 + mkt_excess)$coefficients[1]),
+    beta = as.numeric(lm(Excess_return ~ 1 + mkt_excess)$coefficients[2]),
+    ret = mean(Excess_return)
+  )
+
+#Elastic net
+sorting_elastic_net <- Elastic_net %>%
+  group_by(month) %>%
+  mutate(
+    portfolio = assign_portfolio(
+      data = cur_data(),
+      var = .pred,
+      n_portfolios = 10
+    ),
+    portfolio = as.factor(portfolio)
+  )%>%  group_by(portfolio, month) %>% summarize(Excess_return = weighted.mean(ret_excess, mktcap_lag), .groups = "drop")
+
+
+elastic_net_portfolios_summary <- sorting_elastic_net %>%
+  dplyr::left_join(factors_ff_monthly, by = "month") %>%
+  group_by(portfolio) %>%
+  summarise(
+    alpha = as.numeric(lm(Excess_return ~ 1 + mkt_excess)$coefficients[1]),
+    beta = as.numeric(lm(Excess_return ~ 1 + mkt_excess)$coefficients[2]),
+    ret = mean(Excess_return)
+  )
+```
+
+
+```{r echo=FALSE}
+#making the long-short strategy based on Random forest
+rf_longshort <- sorting_rf %>%
+  ungroup() %>%
+  mutate(portfolio = case_when(
+    portfolio == 10 ~ "high",
+    portfolio == 1 ~ "low"
+  )) %>%
+  filter(portfolio %in% c("low", "high")) %>%
+  pivot_wider(month, names_from = portfolio, values_from = Excess_return) %>%
+  mutate(long_short = high - low) %>%
+  left_join(factors_ff_monthly, by = "month")
+
+
+longshort <- coeftest(lm(long_short ~ 1 + mkt_excess, data = rf_longshort), vcov = NeweyWest)
+
+#making the long-short strategy based on elastic net
+elastic_net_longshort <- sorting_elastic_net %>%
+  ungroup() %>%
+  mutate(portfolio = case_when(
+    portfolio == 10 ~ "high",
+    portfolio == 1 ~ "low"
+  )) %>%
+  filter(portfolio %in% c("low", "high")) %>%
+  pivot_wider(month, names_from = portfolio, values_from = Excess_return) %>%
+  mutate(long_short1 = high - low) %>%
+  left_join(factors_ff_monthly, by = "month")
+
+
+longshort_elastic_net <- coeftest(lm(long_short1 ~ 1 + mkt_excess, data = elastic_net_longshort), vcov = NeweyWest)
+
+
+df15 <- data.frame(k = c("Random Forest" ,"Elastic Net"),
+                 A = c(longshort[1], longshort_elastic_net[1]),
+                 B = c(longshort[2], longshort_elastic_net[2]),
+                 E = c(round(mean(rf_portfolios_summary$ret[10]) - mean(rf_portfolios_summary$ret[1]), 5), round(mean(elastic_net_portfolios_summary$ret[10]) - mean(elastic_net_portfolios_summary$ret[1]), 5))) 
+
+kable(df15, booktabs = T, digits = 5, col.names = c(" ", "CAPM alpha", "Market beta", "Excess return"), caption = "Table 5: Long-short strategy") %>% kable_classic(full_width = F, html_font = "Cambria") %>% kable_styling(latex_options = "HOLD_position")
+```
+Both machine learning portfolios perform worse than the market excess return. The portfolio based on random forest has an excess return of -0.00016, where the portfolio based on the elastic net has a negative excess return of -0.0068. Both portfolios have negative CAPM alphas. It means that the two machine learning portfolios underperform compared to the market.
