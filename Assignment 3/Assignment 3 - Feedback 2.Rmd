@@ -1,0 +1,354 @@
+---
+title: "Mandatory Assignment 3 - Hand In"
+author: " "
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(kableExtra.auto_format = FALSE)
+# Load the packages
+library(tidyverse)
+library(RSQLite)
+library(scales)
+library(quadprog)
+library(alabama)
+```
+
+
+``` {r, echo = FALSE}
+
+# Set working directory
+setwd("C:/Users/jacob/OneDrive/Skrivebord/Advanced Empirical Finance/R")
+
+# Establish connection
+tidy_finance <- dbConnect(SQLite(), "data/tidy_finance.sqlite",
+                          extended_types = TRUE)
+
+# Monthly CRSP data set
+crsp_monthly <- tbl(tidy_finance, "crsp_monthly") %>%
+  collect()
+
+# Fama french data set
+factors_ff_monthly <- tbl(tidy_finance, "factors_ff_monthly") %>%
+  collect()
+
+```
+
+## Exercise 1
+
+For this analysis we will be using monthly CRSP data. Note that throughout the sample, there are `r crsp_monthly %>% summarize(securities = n_distinct(permno))` unique stocks. However, as we are interested in a *balanced* panel (which is defined by having exactly *T* observations for all *N* entities), this restricts our investment universe by a large amount. More specifically, we are asked to use stocks with an uninterrupted history from 1962 to 2020. Since the beginning month of 1962 is not explicitly specified, we take a look at the monthly number of unique stocks throughout the first half of the 1960's in Figure 1. We see that in 1962-08-01, the number of available stocks are 1945 as opposed to 1116 to the month before. Therefore, we use august 1962 as the beginning time stamp.
+
+
+``` {r, out.width = "80%", fig.align='center', echo = FALSE}
+### Exercise 1 ###
+
+# Number of unique stocks pr. month
+#Num_stocks_pr_month <- crsp_monthly %>% 
+#  group_by(month) %>% 
+#  tally()
+
+# Plot of number of stocks before '65 (to find breakpoint at which the number of stocks are expanded)
+crsp_monthly %>%
+  filter(month <= '1965-01-01') %>% 
+  count(date) %>% 
+  ggplot(aes(x = date, y = n)) +
+  geom_line() +
+  labs(
+    x = NULL, y = NULL, color = NULL, linetype = NULL,
+    title = "Monthly number of securities"
+  ) + 
+  scale_x_date(date_breaks = "1 years") +
+  scale_y_continuous(labels = comma) +
+  theme_minimal()
+``` 
+
+
+
+``` {r, echo = TRUE}  
+# Choose starting point as '1962-08-01' based on code above -> large jump in available stocks
+relevant_dates_ff <- factors_ff_monthly %>% 
+  filter(month >= '1962-08-01')
+
+# Number of monthly observations needed for the balanced panel
+relevant_num_of_dates <- relevant_dates_ff %>% 
+  select(month) %>% 
+  tally() %>% 
+  pull()
+
+# Number of observation pr. stock
+num_of_obs_per_stock <- crsp_monthly %>% 
+  group_by(permno) %>% 
+  tally()
+
+# 'Balanced' panel of stock data - Permno 21231 can be found by 
+# viewing data up until that code line
+data <- crsp_monthly %>% 
+  left_join(num_of_obs_per_stock, by = "permno") %>% 
+  select(permno, month, ret_excess, n) %>% 
+  filter(n == relevant_num_of_dates) %>% 
+  pivot_wider(names_from = permno, values_from = ret_excess) %>% 
+  select(-"21231", -"n") %>% 
+  filter(month >= '1962-08-01')
+
+data <- data %>% 
+  select(-month)
+```
+
+
+To obtain our balanced panel of stocks, we need to find those with an uninterrupted data history up until today, out of the initial 1945 stocks available at 1962-08-01. We use the 'month' variable from the 'factors_ff_monthly' data set to count the number of monthly observations up until today. We call this variable *relevant_num_of_dates* The number of observations for each stock throughout the sample is counted, so that we may filter those stock with the relevant number of observations (i.e. sorting out stocks with history breaches or those ending prior to 2020). The stock with *permno*-key "21231" is removed, as it ends in 2017. Ultimately, this leaves us with a balanced panel of stocks with full data from 1962 to 2020 of `r data %>% ncol()` unique stocks.
+
+## Exercise 2 
+
+### Exercise 2.1
+
+* Work in progress *
+Some of the intermediate calculations are still being worked on, but from eye-balling the result from the lecture slides and how this setup differs, I believe that the closed-form solution should be (close to) the following
+
+$$\omega^{*}_{t+1} = \frac{1}{\gamma} \Big(\tilde{\Sigma}^{-1} - \frac{1}{\iota' \tilde{\Sigma}^{-1} \iota} \tilde{\Sigma}^{-1}\iota \iota' \tilde{\Sigma}^{-1} \Big)\tilde{\mu} + \frac{1}{\iota' \tilde{\Sigma}^{-1}\iota}\tilde{\Sigma}^{-1} \iota $$
+where $\tilde{\mu} = \mu + 2\lambda\Sigma\omega_{t^{+}}$ and $\tilde{\Sigma} = \Sigma + \frac{\lambda}{\gamma}\Sigma = (1 + \frac{\lambda}{\gamma})\Sigma$
+
+
+### Exercise 2.2
+
+The code below first implements the closed form solution to the portfolio optimization problem. Secondly, the solution is also solved numerically with the 'alabama' package. The two solutions may be compared and produce similar results, which we take as a sign of robustness.
+
+``` {r, echo = TRUE}
+# Write a function that computes optimal weights based on mu, sigma, gamma,
+# lambda and current weights w+
+compute_efficient_weight_tc <- function(Sigma,
+                              mu,
+                              gamma = 4,
+                              lambda = 0,
+                              w_prev = 1/ncol(Sigma) * rep(1, ncol(Sigma))){
+  
+  N <- ncol(Sigma)
+  iota <- rep(1, N)
+  Sigma_processed <- Sigma + 2*lambda / gamma * Sigma
+  mu_processed <- mu + 2*lambda * Sigma %*% w_prev
+  
+  Sigma_inverse <- solve(Sigma_processed)
+  
+  w_mvp <- Sigma_inverse %*% iota
+  w_mvp <- as.vector(w_mvp / sum(w_mvp))
+  w_opt <- w_mvp + 1/gamma * 
+    (Sigma_inverse - 1 / sum(Sigma_inverse) * Sigma_inverse %*% iota %*% t(iota) 
+     %*% Sigma_inverse) %*% mu_processed
+  return(as.vector(w_opt))
+}
+
+# Compare with numerical implementation with 'alabama' package
+compute_efficient_weight_tc_num <- function(Sigma,
+                                           mu,
+                                           w_prev,
+                                           lambda = 20 / 10000,
+                                           gamma = 4){
+  fn <- function(w){
+    obj <- w%*%as.vector(mu) -
+      as.numeric(lambda) * t((w - w_prev)) %*% Sigma %*% (w - w_prev) -
+      gamma/2 * t(w) %*% Sigma %*% w
+    return(-obj)}
+  
+  out <- constrOptim.nl(par = w_prev,
+                        fn = fn,
+                        heq = function(w) return(sum(w) - 1),
+                        control.outer = list(trace = FALSE))
+  return(as.numeric(out$par))
+}
+
+```
+
+
+### Exercise 2.3
+
+In Figure 2, we see the distance between the sum of absolute portfolio weights between the equal weighted allocation (benchmark) and the turnover restricted portfolio allocation, for different values of $\lambda$, as well as for risk-aversion. Unlike the case we have seen in the exercise classes, the portfolio allocation does not seem to be very sensitive to the value of the transaction parameter $\lambda$. If we were to view larger values of the parameter (upwards of 50.000), then we would see a similar decaying pattern for the distance between the minimum variance portfolio and the transaction-cost adjusted portfolio. A possible explanation for this could be the fact that we're scaling with the covariance matrix $\Sigma$, which could dominate the dynamics, much more than the transaction cost parameter $\lambda$ does. It is still comforting to see that for higher risk aversion, the closer we get to the minimum variance portfolio, which is a familiar result.
+
+
+``` {r, echo = FALSE}
+# Compute sample mean and covariance
+mu <- colMeans(data)
+Sigma <- cov(data)
+
+# Minimum-variance pf
+w_mvp <- solve(Sigma) %*% rep(1, ncol(Sigma))
+w_mvp <- as.vector(w_mvp / sum(w_mvp))
+
+# Test implemented function
+#compute_efficient_weight_tc(Sigma, mu, lambda = 200 / 10000)
+
+# Plot of transaction costs
+transaction_costs <- expand_grid(gamma = c(2,4,8,20),
+                                 lambda = 100 * qexp((1:99)/100)) %>% 
+  mutate(weights = map2(.x = gamma,
+                        .y = lambda,
+                        ~compute_efficient_weight_tc(Sigma,
+                                                     mu,
+                                                     gamma = .x,
+                                                     lambda = .y / 10000,
+                                                     w_prev = 1/ncol(Sigma) * rep(1, ncol(Sigma)))),
+         concentration = map_dbl(weights, ~sum(abs(. - w_mvp))))
+
+# Actual plot
+transaction_costs %>% 
+  mutate(`Risk aversion` = as_factor(gamma)) %>% 
+  ggplot(aes(x = lambda, y = concentration, color = `Risk aversion`)) +
+  geom_line() +
+  scale_x_sqrt() +
+  labs(x = "Transaction cost parameter",
+       y = "Distance from MVP",
+       title = "Optimal portfolio weights for different risk aversions and transaction costs")
+```
+
+
+
+## Exercise 3
+
+``` {r, echo = FALSE}
+
+# Function for computing weights with no-short-sale restriction
+compute_efficient_weight_no_shortsale <- function(Sigma,
+                                                  mu,
+                                                  gamma = 4){
+  N <- ncol(Sigma)
+  A <- cbind(1, diag(N))
+  out <- solve.QP(Dmat = gamma * Sigma,
+                  dvec = mu,
+                  Amat = A,
+                  bvec = c(1, rep(0, N)),
+                  meq = 1)
+  return(as.numeric(out$solution))
+}
+
+# Numerical implementation of transaction cost adjusted pf weights
+compute_efficient_weight_tc_num <- function(Sigma,
+                                           mu,
+                                           w_prev,
+                                           lambda = 20 / 10000,
+                                           gamma = 4){
+  fn <- function(w){
+    obj <- w%*%as.vector(mu) -
+      as.numeric(lambda) * t((w - w_prev)) %*% Sigma %*% (w - w_prev) -
+      gamma/2 * t(w) %*% Sigma %*% w
+    return(-obj)}
+  
+  out <- constrOptim.nl(par = w_prev,
+                        fn = fn,
+                        heq = function(w) return(sum(w) - 1),
+                        control.outer = list(trace = FALSE))
+  return(as.numeric(out$par))
+}
+```
+
+
+``` {r, echo = FALSE}
+# Initial setup
+n_data <- ncol(data)
+window_length <- 120 
+periods <- nrow(data) - window_length 
+
+lambda <- 200/10000
+gamma <- 4
+
+performance_values <- matrix(NA, 
+                             nrow = periods, 
+                             ncol = 3) # A matrix to collect all returns
+colnames(performance_values) <- c("raw_return", "turnover", "net_return") 
+
+performance_values <- list("MV (TC)" = performance_values, 
+                           "Naive" = performance_values, 
+                           "MV (NS)" = performance_values)
+
+w_prev_1 <- w_prev_2 <- w_prev_3 <- rep(1 / n_data , n_data)
+
+
+# Helper functions
+adjust_weights <- function(w, next_return){
+  w_prev <- 1 + w * next_return
+  as.numeric(w_prev / sum(as.vector(w_prev)))
+}
+
+evaluate_performance <- function(w, w_previous, next_return, lambda = 200 / 10000){
+  raw_return <- as.matrix(next_return) %*% w
+  turnover <- sum(abs(w - w_previous))
+  net_return <- raw_return - lambda * turnover
+  c(raw_return, turnover, net_return)
+}
+```
+
+
+```{r, echo = FALSE}
+# Backtesting loop
+for(p in 1:periods){
+  
+  returns_window <- data[p : (p + window_length - 1), ]
+  next_return <- data[p + window_length, ]
+  
+  
+  Sigma <- cov(returns_window)
+  mu <- colMeans(returns_window)
+  
+  # Transaction-cost adjusted portfolio
+  w_1 <- compute_efficient_weight_tc_num(Sigma = Sigma,
+                                     mu = mu,
+                                     w_prev = w_prev_1,
+                                     gamma = 4,
+                                     lambda = lambda)
+  
+  performance_values[[1]][p, ] <- evaluate_performance(w_1,
+                                                       w_prev_1,
+                                                       next_return,
+                                                       lambda = lambda)
+  
+  w_prev_1 <- adjust_weights(w_1, next_return)
+  
+  
+  # Naive portfolio
+  w_2 <- rep(1 / n_data, n_data)
+  
+  performance_values[[2]][p, ] <- evaluate_performance(w_2,
+                                                       w_prev_2,
+                                                       next_return)
+  
+  w_prev_2 <- adjust_weights(w_2, next_return)
+  
+  
+  # Mean-variance no short-sale
+  w_3 <- compute_efficient_weight_no_shortsale(Sigma,
+                                               mu)
+  
+  performance_values[[3]][p, ] <- evaluate_performance(w_3,
+                                                       w_prev_3,
+                                                       next_return)
+  
+  w_prev_3 <- adjust_weights(w_3, next_return)
+  
+}
+```
+
+```{r, echo = FALSE}
+# Present performance
+performance <- lapply(performance_values, as_tibble) %>% 
+  bind_rows(.id = "strategy")
+```
+
+```{r, echo = FALSE}
+performance %>% 
+  group_by(strategy) %>% 
+  summarize(Mean = 12 * mean(100 * net_return),
+            SD = sqrt(12) * sd(100 * net_return),
+            `Sharpe ratio` = if_else(Mean > 0, Mean / SD, NA_real_),
+            Turnover = 100 * mean(turnover)) %>% 
+  knitr::kable(digits = 2, caption = "Portfolio performance table")
+```
+
+Table 1 presents the results for our backtesting experiment, where we evaluate the performance of the transaction-cost adjusted portfolio strategy (MV (TC)), the no short-selling strategy (MV (NS)) and the naive equal-weighted strategy. All of the columns are annualized values and for net returns, i.e. returns adjusted for turnover costs. It is somewhat surprising to see that neither of two mean-variance strategies produce any positive mean excess return and thus a positive Sharpe ratio. This appears largely to be a product of the huge turnover that these strategies seem to occur. As the no short-selling constraint is essentially already a "shrinkage" method, see Jagannathan and Ma (2003), one could have expected *less* turnover, than is the case here. A possible explanation for these results, may be that the mean and covariance sample estimators struggle with our number of assets ($N = 21$) and produce inaccurate estimates. One good candidate for this would be the Ledoit-Wolf estimator, to further minimize the turnover of these strategies.
+
+
+
+
+
+
+

@@ -1,0 +1,376 @@
+---
+title: "AEF Assignment 3"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+library(tidyverse)
+library(tidyquant)
+library(kableExtra)
+library(quadprog)
+library(RSQLite)
+library(RPostgres)
+library(slider)
+library(scales)
+library(furrr)
+library(lubridate)
+library(sandwich)
+library(lmtest)
+library(broom)
+library(tidymodels)
+library(keras)
+library(hardhat)
+library(glmnet)
+library(timetk)
+library(gridExtra)
+library(rmgarch)
+library(alabama)
+
+#Load data, pls use your own path for the data
+tidy_finance <- dbConnect(SQLite(), "C:/Users/Daniel/Desktop/tidy_finance.sqlite", extended_types = TRUE) 
+
+
+
+
+```
+
+
+
+1.
+We use the processed monthly data for the crsp-dataset as provided in the course. To remove any stock that has missing values (and thereby an interrupted data sequence) we count the number of times the unique permno's show up and the remove any stocks that has less than the maximum count. This approach works as there is a permno connected to each monthly return. After removing stocks with interrupted data sequences we remove any data points from before January 1962  and any after December 2020. The data-set then includes 107 unique stocks, all listed on either NYSE or NASDAQ. 
+```{r}
+#Connect to the database
+crsp_monthly <- tbl(tidy_finance, "crsp_monthly") %>% 
+  collect()
+
+data <- crsp_monthly %>%
+  add_count(permno) %>% #count number of times a permno shows up
+  filter(n==max(n)) %>% #Remove series with less than max counts to only have uninterrupted series
+  filter(month >="1962-01-01" & month <= "2020-12-01") %>% #Remove data from before 1962 and after 2020
+  group_by(permno)
+
+# data %>%
+#   count(permno)
+# 
+# data %>%
+#   count(exchange)
+
+#Summary statistics for excess returns
+summaryret <- data %>%
+  group_by(month) %>%
+  summarise(across(ret_excess,
+                  list(mean = mean, sd = sd, min = min,
+                    q25 = ~quantile(., 0.25),
+                    median = median,
+                    q75 = ~quantile(., 0.75), max = max),
+                  .names = "{.fn} return")) %>%
+  summarise(across(-month, mean)) 
+
+summaryret
+
+
+```
+
+
+
+2.
+Derivation of the closed form solution:
+$$w^*_{t+1}= arg \hspace{1mm} \underset{\omega' \epsilon R^N , \iota' \omega=1}{max} \omega' \mu - v_{t}(\omega,\omega_{t^+})-\frac{\gamma}{2}\omega'\Sigma\omega \\  
+=arg \hspace{1mm} \underset{\omega' \epsilon R^N , \iota' \omega=1}{max} \omega' \mu - \lambda(\omega-\omega_{t^+})\Sigma(\omega-\omega_{t^+})-\frac{\gamma}{2}\omega'\Sigma\omega \\ 
+=arg \hspace{1mm} \underset{\omega' \epsilon R^N , \iota' \omega=1}{max} \omega' \mu - \lambda\Sigma(\omega'\omega-2\omega'\omega_{t^+}+\omega'_{t^+}\omega_{t^+})-\frac{\gamma}{2}\omega'\Sigma\omega \\ 
+=arg \hspace{1mm} \underset{\omega' \epsilon R^N , \iota' \omega=1}{max} \omega'(\mu+\lambda\Sigma2\omega_{t^+})-\frac{\gamma}{2}\omega'\left(\Sigma+\frac{2\lambda\Sigma}{\gamma}\right)\omega \\ 
+=arg \hspace{1mm} \underset{\omega' \epsilon R^N , \iota' \omega=1}{max} \omega'\mu^* - \frac{\gamma}{2}\omega'\Sigma^*\omega \\ 
+ \text{where} \hspace{3mm} \Sigma^*=(1+\frac{\lambda}{\gamma})\Sigma \hspace{3mm}\text{and}\hspace{3mm}\mu^*=\mu+2\lambda\Sigma\omega_{t^+} \\
+\text{As this is a standard mean variance portfolio choice problem we can write}\\
+ \omega^*_{t+1}= \frac{1}{\gamma}\left(\Sigma^{*-1}-\frac{1}{\iota'\Sigma^{*-1}\iota}\Sigma^{*-1}\iota\iota'\Sigma^{*-1} \right)\mu^*+\frac{1}{\iota'\Sigma^{*-1}\iota}\Sigma^{*-1}\iota $$
+
+We can argue that setting transaction costs proportional to volatility makes sense, as higher volatility would require an investor to re-balance more often. But considering a period with high volatility, where the portfolio could in principle require daily re-balancing, we find it unlikely that a real life investor would actually re-balance daily. 
+
+```{r}
+
+#make data use-able for the portfolio problem
+data2 <- data %>%
+  select(permno, ret_excess, month) %>%
+  pivot_wider(names_from = permno, values_from = ret_excess) %>%
+  select(-month)
+
+N <- ncol(data2)
+
+```
+
+
+
+```{r}
+#Solutions to the minimum variance portfolio
+Sigma <- cov(data2)
+w_mvp <- solve(Sigma) %*% rep(1, ncol(Sigma))
+w_mvp <- as.vector(w_mvp / sum(w_mvp))
+
+
+
+```
+
+
+
+
+```{r, echo=TRUE}
+#Function that computes the optimal portfolio allocation with transaction cost
+compute_efficient_weight <- function(Sigma,
+                                     mu,
+                                     gamma = 4, 
+                                     lambda = 0, # transaction costs
+                                     w_prev = 1/ncol(Sigma) * rep(1, ncol(Sigma))){ 
+
+  iota <- rep(1, ncol(Sigma))
+  Sigma_processed <- Sigma + (2 * lambda * Sigma)/ gamma  #diag(ncol(Sigma))
+  mu_processed <- mu + lambda * Sigma * 2 * w_prev
+  
+  Sigma_inverse <- solve(Sigma_processed)
+  
+  w_mvp <- Sigma_inverse %*% iota
+  w_mvp <- as.vector(w_mvp / sum(w_mvp))
+  w_opt <- w_mvp  + 1/gamma * (Sigma_inverse - 1 / sum(Sigma_inverse) * Sigma_inverse %*% iota %*% t(iota) %*% Sigma_inverse) %*% mu_processed
+  return(as.vector(w_opt))
+}
+```
+
+
+```{r}
+mu <- colMeans(data2)
+
+w_opt <- compute_efficient_weight(Sigma, mu)
+
+
+
+```
+
+
+
+```{r}
+
+#Illustrate the effect of transaction costs
+transaction_costs <- expand_grid(gamma = 4,
+                                 lambda = 20 * qexp((1:99)/100)) %>% 
+  mutate(weights = map2(.x = gamma, 
+                        .y = lambda,
+                        ~compute_efficient_weight(Sigma,
+                                                  mu,
+                                                  gamma = .x,
+                                                  lambda = .y / 10000,
+                                                  w_prev = w_mvp)),
+         concentration = map_dbl(weights, ~sum(abs(. -w_opt))))
+
+
+transaction_costs %>% 
+  mutate(`Risk aversion` = as_factor(gamma)) %>% 
+  ggplot(aes(x = lambda, y = concentration, color = `Risk aversion`)) + 
+  geom_line() +
+  scale_x_sqrt() +
+  labs(x = "Transaction cost parameter", 
+       y = "Distance from EFP",
+       title = "Optimal portfolio weights for different transaction costs")
+
+
+#c(0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20)
+#20 * qexp((1:99)/100)
+
+```
+
+We can conclude that the higher the transaction cost (and therefore also volatility) the further we get from the efficient portfolio, which makes intuitive sense as we would be able to rebalance constantly for very small transaction costs, while rebalancing too often with high transaction costs would eat our capital thus leading to long periods where the portfolio is out of balance so to speak. As the efficient portfolio also contains the minimum variance portfolio it is also likely that an investor would hold a more of the minimum variance portfolio to reduce the overall portfolio risk. 
+
+
+
+3.
+We compute rolling window estimation for the naive portfolio, the mean-variance portolio, the mean-variance portfolio with transaction costs and the mean-variance portfolio with a no short selling constraint. We consider 250 past periods for the parameter estimates before computing portfolio weigths again. Transaction costs then affect the portfolios performance when rebalancing. 
+
+```{r}
+#Make the returns-data into a matrix
+data2 <- data2%>%
+  as.matrix()
+
+```
+
+
+
+```{r}
+
+window_length <- 250 
+
+optimal_tc_weight <- function(w_prev,
+                              mu,
+                              Sigma,
+                              lambda = 200 / 10000,
+                              gamma = 4){
+
+fn <- function(w){
+  obj <- w%*%as.vector(mu) -
+    as.numeric(lambda) %*% t(w - w_prev)%*%Sigma%*%(w-w_prev) -
+    gamma/2 * t(w) %*% Sigma %*% w
+  return(-obj)}
+
+
+out <- alabama::constrOptim.nl(par = w_prev,
+fn = fn,
+heq = function(w) return(sum(w) - 1),
+control.outer =list(trace = FALSE))
+return(as.numeric(out$par))
+}
+
+
+```
+
+
+
+```{r}
+
+optimal_no_short_sale_weight <- function(mu,
+                                        Sigma,
+                                        gamma = 4){
+  N <- ncol(Sigma)
+  A <- cbind(1, diag(N))
+  
+out <- quadprog::solve.QP(Dmat = gamma * Sigma,
+        dvec = mu,
+        Amat = A,
+        bvec = c(1, rep(0, N)),
+        meq = 1)
+
+return(as.numeric(out$solution))
+}
+
+
+```
+
+
+```{r, cache=TRUE}
+
+#This code chunk computes rolling window estimation of the portfolio problems
+
+periods <- nrow(data2) - window_length # total number of out-of-sample periods
+
+oos_values <- matrix(NA,
+                    nrow = periods,
+                    ncol = 3) # A matrix to collect all returns
+
+colnames(oos_values) <- c("raw_return", "turnover", "net_return")
+
+all_values <- list(oos_values,
+                  oos_values,
+                  oos_values,
+                  oos_values)
+
+w_prev_1 <- w_prev_2 <- w_prev_3 <- w_prev_4 <- rep(1/N ,N)
+
+lambda <- 200 / 10000
+
+for(i in 1:periods){ # Rolling window
+# Extract information
+return_window <- data2[i : (i + window_length - 1),]
+
+# Sample moments
+Sigma <- cov(return_window)
+mu <- colMeans(return_window)
+
+# Optimal TC robust portfolio
+w_1 <- optimal_tc_weight(w_prev = w_prev_1,
+                            mu = mu,
+                            Sigma = Sigma,
+                            lambda = lambda)
+
+# Evaluation
+raw_return <- 1 + data2[i + window_length, ] %*% w_1
+turnover <- sum(abs(w_1 - w_prev_1))
+
+# Store realized returns
+net_return <- raw_return - lambda * turnover
+all_values[[1]][i, ] <- c(raw_return, turnover, net_return)
+
+#Computes adjusted weights based on the weights and next period returns
+w_prev_1 <- w_1 * as.vector(1 + data2[i + window_length, ])
+w_prev_1 <- w_prev_1 / sum(as.vector(w_prev_1))
+
+
+# Efficient portfolio
+w_2 <- optimal_tc_weight(w_prev = w_prev_2,
+                    mu = mu,
+                    Sigma = Sigma,
+                    lambda = 0)
+
+# Evaluation
+raw_return <- 1 + data2[i + window_length, ] %*% w_2
+turnover <- sum(abs(w_2 - w_prev_2))
+
+# Store realized returns
+net_return <- raw_return - lambda * turnover
+all_values[[2]][i, ] <- c(raw_return, turnover, net_return)
+
+#Computes adjusted weights based on the weights and next period returns
+w_prev_2 <- w_2 * as.vector(1 + data2[i + window_length, ])
+w_prev_2 <- w_prev_2 / sum(as.vector(w_prev_2))
+
+# Naive Portfolio
+w_3 <- rep(1/N, N)
+
+
+# Evaluation
+raw_return <- 1 + data2[i + window_length, ] %*% w_3
+turnover <- sum(abs(w_3 - w_prev_3))
+
+# Store realized returns
+net_return <- raw_return - lambda * turnover
+all_values[[3]][i, ] <- c(raw_return, turnover, net_return)
+
+#Computes adjusted weights based on the weights and next period returns
+w_prev_3 <- w_3 * as.vector(1 + data2[i + window_length, ])
+w_prev_3 <- w_prev_3 / sum(as.vector(w_prev_3))
+
+# No-short sale portfolio
+w_4 <- optimal_no_short_sale_weight(mu, Sigma)
+
+# Evaluation
+raw_return <- 1 + data2[i + window_length, ] %*% w_4
+turnover <- sum(abs(w_4 - w_prev_4))
+
+# Store realized returns
+net_return <- raw_return - lambda * turnover
+all_values[[4]][i, ] <- c(raw_return, turnover, net_return)
+
+#Computes adjusted weights based on the weights and next period returns
+w_prev_4 <- w_4 * as.vector(1 + data2[i + window_length, ])
+w_prev_4 <- w_prev_4 / sum(as.vector(w_prev_4))
+}
+
+
+
+
+```
+
+
+
+```{r}
+
+all_values <- lapply(all_values, as_tibble) %>%
+  bind_rows(.id = "strategy")
+
+all_values %>%
+  group_by(strategy) %>%
+  summarise(Mean = 250 * 100 * (mean(net_return - 1)),
+            SD = sqrt(250) * 100 * sd(net_return - 1),
+            Sharpe = if_else(Mean>0, Mean/SD, NA_real_),
+            Turnover = 100 * mean(turnover)) %>%
+  mutate(strategy = case_when(strategy == 1 ~ "MV (TC)",
+                              strategy == 2 ~ "MV",
+                              strategy == 3 ~ "Naive",
+                              strategy == 4 ~ "MV (no-short selling)")) %>%
+knitr::kable(digits = 3)
+
+
+```
+
+We note that the portfolio performance values we get are rather extreme and we should be careful to make any strong conclusions based hereon. With the results we have above the naive portfolio performs the best by miles, which is likely due to strong estimation errors. It is also note-able that the mean variance portfolio produces a negative return but performs better when the transaction costs and no-short-selling restrictions are imposed respectively. 
+
+A true out-of-sample test would estimate the portfolios using all available data up to the actual date today and then wait and see how they perform as we get to know tomorrows stock movements and so forth. Thus what we do here is often referred to as a pseudo out of sample, as the data we evaluate against is still realized stock prices (not unknown).
+
+
