@@ -1,0 +1,429 @@
+---
+title: "MA3 - Advanced Empirical Finance"
+date: "15/05/2022"
+header-includes: \usepackage[utf8]{inputenc} \usepackage[T1]{fontenc} \usepackage{floatrow}
+  \floatsetup[figure]{capposition=top} \floatsetup[table]{capposition=top} \floatplacement{figure}{H}
+  \floatplacement{table}{H}
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+fontsize: 12pt
+line-height: 1.5
+geometry: margin=1.9cm
+toc: yes
+toc_depth: 3
+classoption: a4paper
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(cache = TRUE)
+
+
+getwd()
+setwd("C:/Users/mikro/OneDrive/Dokumenter/Advanced empirical finance") 
+
+# Load packages
+library(dplyr)
+library(tidyverse)
+library(tidymodels)
+library(RSQLite) 
+library(keras)
+library(hardhat)
+library(timetk)
+library(knitr)
+library(lmtest)
+library(sandwich)
+library(reshape2)
+library(quadprog)
+library(alabama)
+
+#load data
+tidy_finance <- dbConnect(SQLite(), "data/tidy_finance.sqlite", extended_types = TRUE)
+crsp_monthly <- tbl(tidy_finance, "crsp_monthly")%>%
+  select(-date) %>%
+  collect()
+
+
+
+```
+
+
+
+## Introduction
+
+In this assignment we examine the effect that transactions cost have on optimal portfolio allocation. Transaction cost are often overseen in financial litterateur, where transaction cost often are assumed to be zero or implemented ex post. This however an unrealistic assumption as market imperfection and liquidate assets often create significant  transaction cost, which a real world investor should take into account when rebalancing his portfolio.  
+
+
+First we take a look at our data-set and its charteristicks in excesice 1. Then in excersice 2 we derive the closed form solution to the portfolio optimization problem where the transaction cost are quadratic in rebalancing and proportional to the level of volatility. Thereafter we take a look at how the level of turnover penalization effect the distance between the weights from a naive portfolio to the weights of the efficient portoflio. In excesice 3, we preform a out-of-sample back-test on 3 different strategies with $L1$ transaction cost, using Ledoit-Wolf linear shrinkage to obtain our estiamtes.     
+
+
+
+
+For the empirical assignment we use monthly CRSP data form 1962 to 2020. 
+
+## Ex 1
+
+
+```{r data prepration}
+data_sigma <- crsp_monthly %>% dcast( month ~ permno, value.var = "ret_excess") %>% filter(month >= "1962-01-01") 
+
+data_sigma <- data_sigma[ , colSums(is.na(data_sigma)) == 0]  
+
+returns <- data_sigma %>%
+  select(-month)
+
+```
+
+
+
+ sort the data such that we only have assets with uninterrupted data from 1962 to 2020. We end up with 119 stocks that each have 708 observations. 
+
+## Ex 2
+$$
+\omega_{t+1}^{*} =\arg\max_{\omega_{t+1}\in\mathbb{R}^{N},\iota^{\prime}\omega_{t+1}=1}\omega_{t+1}^{\prime}\mu-\nu_{t}\left(\omega,\omega_{t+1},\beta\right)-\frac{\gamma}{2}\omega_{t+1}^{\prime}\Sigma\omega_{t+1}
+$$
+
+$$
+   \nu_{t}\left(\omega,\omega_{t+1},\beta\right)=\lambda\left(\omega_{t+1}-\omega_{t+}\right)^{\prime}\Sigma\left(\omega_{t+1}-\omega_{t+}\right)
+$$
+From Hautsch et. al. (2019) we have the quadratic transactions cost.  
+Plug the term into the first equation and rearrange terms: 
+
+$$
+\begin{aligned}
+\omega_{t+1}^{*} &=\arg\max_{\omega_{t+1}\in\mathbb{R}^{N},\iota^{\prime}\omega_{t+1}=1}\omega_{t+1}^{\prime}\mu-\lambda\left(\omega_{t+1}-\omega_{t+}\right)^{\prime}\Sigma\left(\omega_{t+1}-\omega_{t+}\right)-\frac{\gamma}{2}\omega_{t+1}^{\prime}\Sigma\omega_{t+1} \\
+
+& =\arg\max_{\omega_{t+1}\in\mathbb{R}^{N},\iota^{\prime}\omega_{t+1}=1}\omega_{t+1}^{\prime}\mu-\lambda\Sigma(\omega_{t+1}^{\prime}\omega_{t+1}-2\omega_{t+1}^{\prime}\omega_{t+}+\omega_{t+}^{\prime}\omega_{t+})-\frac{\gamma}{2}\omega_{t+1}^{\prime}\Sigma\omega_{t+1} \\
+
+
+& =\arg\max_{\omega_{t+1}\in\mathbb{R}^{N},\iota^{\prime}\omega_{t+1}=1}\omega_{t+1}^{\prime}\left(\mu+2\lambda \Sigma \omega_{t+}\right)-\frac{\gamma}{2}\omega_{t+1}^{\prime}\left(\Sigma+\frac{2\lambda}{\gamma}\Sigma\right)\omega_{t+1} \\
+	& =\arg\max_{\omega_{t+1}\in\mathbb{R}^{N},\iota^{\prime}\omega_{t+1}=1}\omega_{t+1}^{\prime}\mu^{*}_\lambda-\frac{\gamma}{2}\omega_{t+1}^{\prime}\Sigma^{*}_\lambda\omega_{t+1}  
+\end{aligned}
+$$
+
+where we have: 
+$$
+\begin{aligned}
+\mu^{*}_\lambda=\mu+2\lambda \Sigma\omega_{t+} \\
+\Sigma^{*}_\lambda=\Sigma+\frac{2\lambda}{\gamma}\Sigma \\
+\end{aligned}
+$$
+From the equation we clearly see that $\Sigma$ enters in the mean, and is proptional to the level of turnover penalization $\lambda$.  
+
+Now that we have incoorporated ex-ante transaction cost we can simple solve the Markowitz mean variance problem whiteout transaction costs, since we can simple adjust the expression $\mu$ and $\Sigma$ with $\mu_\lambda$ and $\Sigma_\lambda$. At this point we can solve the Lagrangian by optimizing the the weight. 
+
+$$
+\begin{gather*}
+    \mathcal{L}(\omega_{t+1}) = \omega_{t+1}^{\prime}\mu^{*}_\lambda-\frac{\gamma}{2}\omega_{t+1}^{\prime}\Sigma^{*}_\lambda\omega_{t+1} - \delta (\iota^{\prime} \omega_{t+1} - 1) \\
+ \begin{aligned}
+    \frac{\partial\mathcal{L} (\omega_{t+1})}{\partial \omega_{t+1}} &= \mu^{*}_{\lambda} - \gamma \Sigma^{*}_{\lambda} \omega_{t+1} - \delta \iota = 0 &&\Leftrightarrow \omega_{t+1} = \frac{1}{\gamma}\Sigma^{*-1}_{\lambda} (\mu^{*}_\lambda - \delta \iota) \\
+    \frac{\partial\mathcal{L} (\omega_{t+1})}{\partial \lambda} &= \iota^{\prime} \omega_{t+1} - 1 = 0 &&\Leftrightarrow \iota^{\prime} \omega_{t+1} = 1 
+    \end{aligned}
+\end{gather*}
+$$
+If we combine the FOC's we get the following expression for delta. 
+$$
+\begin{aligned}
+    1 &= \frac{1}{\gamma} (\iota^{\prime}\Sigma^{*-1}_{\lambda}\mu^{*}_\lambda - \lambda \iota^{\prime}\Sigma^{*-1}_{\lambda} \iota) \\
+    \delta &= \frac{1}{\iota^{\prime} \Sigma^{*-1}_{\lambda} \iota} (\iota^{\prime} \Sigma^{*-1}_{\lambda} \mu^{*}_{\lambda} - \gamma) \\
+\end{aligned}
+$$
+
+Which can can reinsert in order in order to derive the close form solution to the optimization problem. 
+$$
+\begin{aligned}
+    \omega_{t+1} &= \frac{1}{\gamma}\Sigma^{*-1}_{\lambda} (\mu^{*}_\lambda - \left( \frac{1}{\iota^{\prime} \Sigma^{*-1}_{\lambda} \iota} (\iota^{\prime} \Sigma^{*-1}_{\lambda} \mu^{*}_{\lambda} - \gamma) \iota \right)  \\
+    \omega_{t+1} &= \frac{\Sigma^{*-1}_{\lambda} \iota }{\iota^{\prime}\Sigma^{*-1}_{\lambda} \iota} +  \frac{1}{\gamma}  \Sigma^{*-1}_{\lambda}\iota \left( \mu^{*}_\lambda - \frac{1}{\iota^{\prime} \Sigma^{*-1}_{\lambda} \iota} \iota^{\prime} \Sigma^{*-1}_{\lambda} \mu^{*}_{\lambda} \right)  \\
+    \omega_{t+1}^{*} &= \frac{1}{\gamma}\left(\Sigma^{*-1}_\lambda-\frac{1}{\iota^{\prime}\Sigma^{*-1}_\lambda\iota}\Sigma^{*-1}_\lambda\iota\iota^{\prime}\Sigma^{*-1}_\lambda\right)\mu^{*}_\lambda+\frac{1}{\iota^{\prime}\Sigma^{*-1}_\lambda\iota}\Sigma^{*-1}_\lambda\iota
+\end{aligned}
+$$
+
+One dould argue there exists some sort of correlation between volatility and trading cost for equaites. High volatility regimes are usually associated with more inefficient markets implying a high bid-ask spread, alongside great amount of uncertainty which increasing the amount of effort the investor need to use collecting information on the stock market in order to make a informed decision, which increase the implicit cost of re balancing. It is therefore fair to assume that volatility can be linked proportional to trading costs.         
+
+```{r Define variables}
+# Define variables
+ticker <- data_sigma %>% select(-month) %>% colnames()
+N <- length(ticker)
+number_of_iterations = 10000 # number of iterations for exercise 2
+gamma = 4
+Sigma <- data_sigma %>% select(-month) %>% cov()
+mu <- data_sigma %>% select(-month) %>% colMeans()
+```
+
+```{r Defining function for optimal weights}
+#lambda=beta/2
+compute_efficient_weight <- function(Sigma,
+                                     mu,
+                                     gamma = 4, 
+                                     lambda = 0, # transaction costs
+                                     w_prev = 1/ncol(Sigma) * rep(1, ncol(Sigma))){ 
+
+  iota <- rep(1, ncol(Sigma))
+  Sigma_processed <- Sigma + lambda*2 / gamma * diag(ncol(Sigma))
+  mu_processed <- mu + lambda*2 * w_prev
+  
+  Sigma_inverse <- solve(Sigma_processed)
+  
+  w_mvp <- Sigma_inverse %*% iota
+  w_mvp <- as.vector(w_mvp / sum(w_mvp))
+  w_opt <- w_mvp  + 1/gamma * (Sigma_inverse - 1 / sum(Sigma_inverse) * Sigma_inverse %*% iota %*% t(iota) %*% Sigma_inverse) %*% mu_processed
+  return(as.vector(w_opt))
+}
+
+```
+
+
+
+```{r pressure, echo=FALSE}
+transaction_costs <- expand_grid(gamma = c(2, 4, 8, 20),
+                                 lambda = 20 * qexp((1:99)/100)) %>% 
+  mutate(weights = map2(.x = gamma, 
+                        .y = lambda,
+                        ~compute_efficient_weight(Sigma,
+                                                  mu,
+                                                  gamma = .x,
+                                                  lambda = .y / 10000,
+                                                  )),
+         concentration = map_dbl(weights, ~sum(abs(. - 1/ncol(Sigma) * rep(1, ncol(Sigma))))))
+
+transaction_costs %>% 
+  mutate(`Risk aversion` = as_factor(gamma)) %>% 
+  ggplot(aes(x = lambda, y = concentration, color = `Risk aversion`)) + 
+  geom_line() +
+  scale_x_sqrt() +
+  labs(x = "Transaction cost parameter", 
+       y = "Distance from naive portfolio",
+       title = "Optimal portfolio weights for different risk aversion and transaction cost")
+
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+We see that the higher the transaction cost are, the less rebalancing of the initial naive portfolio there is. This can be explained by the fact that the investor qucikly findes himself in an allocation where the gain in returns of rebalancing are offset by the large transaction cost associated which such a rebalancing. This would imply that higher turnover penalization all else equal will slow down the speed at which the portfolio weights converges to the optimal portfolio weights.    
+
+## EX 3
+
+The DCC MGRACH are highly restrictive when it comes to the structure of the covariance matrix to ensure stationarity. When it comes to stochastic volatility factor model we also run into computationally problems in high dimensional cases. One could consider a rolling window sample covariance matrix which have the property of being unbiased but may create estimation error when the number observations are comparable or smaller then the number of stocks as stated by Ledoit and Wolf (2003). instead Ledoit and Wolf (2003) proposed                   
+
+
+```{r Defining function for Sigma by Ledoit-Wolf}
+compute_ledoit_wolf <- function(x) {
+  # Computes Ledoit-Wolf shrinkage covariance estimator
+  # This function generates the Ledoit-Wolf covariance estimator  as proposed in Ledoit, Wolf 2004 (Honey, I shrunk the sample covariance matrix.)
+  # X is a (t x n) matrix of returns
+  t <- nrow(x)
+  n <- ncol(x)
+  x <- apply(x, 2, function(x) if (is.numeric(x)) # demean x
+    x - mean(x) else x)
+  sample <- (1/t) * (t(x) %*% x)
+  var <- diag(sample)
+  sqrtvar <- sqrt(var)
+  rBar <- (sum(sum(sample/(sqrtvar %*% t(sqrtvar)))) - n)/(n * (n - 1))
+  prior <- rBar * sqrtvar %*% t(sqrtvar)
+  diag(prior) <- var
+  y <- x^2
+  phiMat <- t(y) %*% y/t - 2 * (t(x) %*% x) * sample/t + sample^2
+  phi <- sum(phiMat)
+  
+  repmat = function(X, m, n) {
+    X <- as.matrix(X)
+    mx = dim(X)[1]
+    nx = dim(X)[2]
+    matrix(t(matrix(X, mx, nx * n)), mx * m, nx * n, byrow = T)
+  }
+  
+  term1 <- (t(x^3) %*% x)/t
+  help <- t(x) %*% x/t
+  helpDiag <- diag(help)
+  term2 <- repmat(helpDiag, 1, n) * sample
+  term3 <- help * repmat(var, 1, n)
+  term4 <- repmat(var, 1, n) * sample
+  thetaMat <- term1 - term2 - term3 + term4
+  diag(thetaMat) <- 0
+  rho <- sum(diag(phiMat)) + rBar * sum(sum(((1/sqrtvar) %*% t(sqrtvar)) * thetaMat))
+  
+  gamma <- sum(diag(t(sample - prior) %*% (sample - prior)))
+  kappa <- (phi - rho)/gamma
+  shrinkage <- max(0, min(1, kappa/t))
+  if (is.nan(shrinkage))
+    shrinkage <- 1
+  sigma <- shrinkage * prior + (1 - shrinkage) * sample
+  return(sigma)
+}
+
+data_sigma_wo_m <- data_sigma %>% select(-month)
+
+Sigma <- compute_ledoit_wolf(data_sigma_wo_m)
+```
+
+
+We perform a full-fledged back testing on the three strategies: Naive portfolio with daily rebalingcing, portfolio with optimal ex-ante adjustment for $L_1$ transaction costs in the spirit of Hautsch et al. (2019), and a minimum variance portfolio with a short selling constraint in the spirit of Jagannathan and Ma (2003). We will quickly go over the three stragies.     
+
+
+
+The naive portfolio with equal weights $$\omega=\frac{1}{N}\iota$$. In our case with 119 stocks we have each weight set at 0,84 pct. 
+ 
+
+$$\nu_{t}\left(\omega_{t+1},\omega_{t+},\lambda\right)=\lambda\left\Vert \omega_{t+1}-\omega_{t+}\right\Vert _{1}=\lambda\sum_{i=1}^{N}\left|\omega_{i,t+1}-\omega_{i,t+}\right|$$
+
+For the $L1$ transaction cost in Hautshc et al(2019), we have that the transaction cost are proportional to the sum of absolute rebalancing. The penalization of the $L1$ transaction cost are stronger then the quadratic transactions cost, and thefore one can argue that it is a more realistic proxy for the actual trading cost the investor faces. In our case we use the penalization term $\lambda=200/10000=200bp$   
+
+Following Hautsch et al(2019) we can compute the optimal portfolio weight with ex-ante adjusted transaction costs: 
+$$\omega_{t+1}^{*}=\max_{\omega\in\mathbb{R}^{N},\iota\omega=1}\omega^{\prime}\mu-\lambda\left\Vert \omega_{t+1}-\omega_{t+}\right\Vert _{1}-\frac{\gamma}{2}\omega^{\prime}\Sigma\omega\text{ s.t. }\iota^{\prime}\omega=1$$
+The optimaztion problem has no closed form solution so ind order to solve the optimization problem non-linear optimization is used. 
+
+In Jagannathan and Ma (2003) it is showen that imposing a shortsale constraint when minimizing the portfolio variance is equivalent to shrinking
+the extreme elements of the covariance matrix, and we therefor faced with the minization problem below. 
+
+ $$\omega_{t+1}^{\text{mvp no s.}}=\min_{\omega\in\mathbb{R}^{N}}\omega^{\prime}\Sigma\omega\text{ s.t. }\iota^{\prime}\omega=1\text{ and }\omega_{i}\geq0\forall i=1,\dots N$$
+The imposed shortsale constraint is a useful tool for dealing with estimation error in the covariance matrix. This is due to the fact that extreme elements in the estimated covariance matrix usually are associated with sampling errors. But it is important to note that if the true contrivance matrix indeed contains extreme elements then the approach would result in specification errors, as we would underestimate the elements in the covariance matrix.            
+
+We use the three above mentioned functions to generate our out-of-sample back-test with a 120 rolling window. The estimated mean is computed as the sample mean of returns, and the covariance is estimated using Ledoit-Wolf shrinkage.     
+
+```{r back testning 1}
+# Portfolio optimzer with L1 transaction costs
+compute_efficient_weight_L1_TC <- function(mu,
+                                          Sigma, 
+                                          gamma = 4, 
+                                          lambda = 0, 
+                                          w_prev = 1 / ncol(sigma) * rep(1, ncol(sigma))) {
+   # Objective function
+  initial_weights <- w_prev
+  objective <- function(w) -t(w) %*% mu + gamma / 2* t(w) %*% Sigma %*% w + lambda * sum(abs(w - w_prev))
+  
+# Weight constraint
+  w_optimal <- constrOptim.nl(
+    par = w_prev,
+    fn = objective, 
+    heq = function(w){sum(w) - 1},
+    control.outer = list(trace = FALSE))
+  
+  w_optimal$par
+  
+
+}
+
+
+# Minimum variance portfolio with no short constraint
+optimal_constrained_mvp_weights <- function(Sigma){
+n_returns <- ncol(data_sigma_wo_m) 
+
+w_no_short_sale <- solve.QP(Dmat = 2*Sigma,
+                            dvec = mu, 
+                            Amat = cbind(1, diag(n_returns)), 
+                            bvec = c(1, rep(0, n_returns)), 
+                            meq = 1)
+w_no_short_sale$solution
+}
+
+```
+
+We use 120 window from the past before update. 
+```{r back testning 2}
+window_length <- 120
+periods <- nrow(returns) - window_length # total number of out-of-sample periods
+
+lambda <- 200/10000  # Transaction costs
+gamma <- 4 # Risk avirson
+
+performance_values <- matrix(NA, 
+                             nrow = periods, 
+                             ncol = 3) # A matrix to collect all returns
+colnames(performance_values) <- c("raw_return", "turnover", "net_return") 
+
+performance_values <- list("MV (TC)" = performance_values, 
+                           "Naive" = performance_values, 
+                           "MV short sell constrained" = performance_values)
+
+w_prev_1 <- w_prev_2 <- w_prev_3 <- rep(1 /N , N)
+
+```
+
+
+We define to helper function adjust weights.
+```{r back testning 3}
+adjust_weights <- function(w, next_return){
+  w_prev <- 1 + w * next_return
+  as.numeric(w_prev / sum(as.vector(w_prev)))
+}
+
+evaluate_performance <- function(w, w_previous, next_return, lambda = 200/10000){
+  raw_return <- as.matrix(next_return) %*% w
+  turnover <- sum(abs(w - w_previous))
+  net_return <- raw_return - lambda * turnover
+  c(raw_return, turnover, net_return)
+}
+```
+
+
+```{r back testning 4}
+
+for(p in 1:periods){
+  
+  returns_window <- returns[p : (p + window_length - 1), ]
+  next_return <- returns[p + window_length, ] 
+  
+  n_returns <- ncol(data_sigma_wo_m)
+  Sigma <- cov(returns_window) 
+  mu <- 0*colMeans(returns_window)
+
+  
+  # Transaction-cost adjusted portfolio
+  w_1 <- compute_efficient_weight_L1_TC(mu = mu, 
+                                        Sigma = Sigma, 
+                                        lambda = lambda, 
+                                        gamma = gamma,
+                                        w_prev = w_prev_1)
+  
+  performance_values[[1]][p, ] <- evaluate_performance(w_1, 
+                                                       w_prev_1, 
+                                                       next_return, 
+                                                       lambda=lambda)
+  
+  w_prev_1 <- adjust_weights(w_1, next_return)
+  
+  # Naive portfolio
+  w_2 <- rep(1 / n_returns, n_returns)
+  
+  performance_values[[2]][p, ] <- evaluate_performance(w_2, 
+                                                       w_prev_2, 
+                                                       next_return)
+  
+  w_prev_2 <- adjust_weights(w_2, next_return)
+  
+  # Portfolio C (Optimal global minimum variance with constraint - Jagannathan and MA, 2003)
+  
+  w_3 <- optimal_constrained_mvp_weights(Sigma = Sigma)
+  
+  performance_values[[3]][p, ] <- evaluate_performance(w_3, 
+                                                       w_prev_3, 
+                                                       next_return)
+  
+  w_prev_3 <- adjust_weights(w_3,next_return)
+}
+
+
+
+performance <- lapply(performance_values, as_tibble) %>% 
+  bind_rows(.id = "strategy")
+
+performance %>%
+  group_by(strategy) %>%
+  summarize(Mean = 12 * mean(100 * net_return),
+            SD = sqrt(12) * sd(100 * net_return), 
+            `Sharpe ratio` = if_else(Mean > 0, Mean / SD, NA_real_),
+            Turnover = 100 * mean(turnover))
+
+```
+
+
+
+
+
+The historical data set must include a truly representative sample of stocks, including those of companies that eventually went bankrupt or were sold or liquidated. The alternative, including only data from historical stocks that are still around today, will produce artificially high returns in backtesting. 
+
+one could consider different asset types as bonds which have another risk profile to provide the investor with stronger incentives to rebalance his portfolio in high and low growth periods. Because equities perform well during high growth and low inflation environments - high incentive to allocate towards stocks, bonds do well in deflationary or recessionary environments - high incentive to allocate towards bonds. This could explain why we see that the MV(TC) and Naive strategy closely relates in terms of Mean and Sharp ratio, as both strategies are exposed to the same type of market risk.   
