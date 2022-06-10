@@ -1,0 +1,580 @@
+---
+title: "MA2 - Advanced Empirical Finance"
+date: "15/04/2022"
+header-includes: \usepackage[utf8]{inputenc} \usepackage[T1]{fontenc} \usepackage{floatrow}
+  \floatsetup[figure]{capposition=top} \floatsetup[table]{capposition=top} \floatplacement{figure}{H}
+  \floatplacement{table}{H}
+output:
+  word_document: default
+  pdf_document: default
+fontsize: 12pt
+line-height: 1.5
+geometry: margin=1.9cm
+toc: yes
+toc_depth: 3
+classoption: a4paper
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(cache = TRUE)
+
+
+
+# Load packages
+library(tidyverse)
+library(tidymodels)
+library(RSQLite) 
+library(keras)
+library(hardhat)
+library(timetk)
+library(knitr)
+library(lmtest)
+library(sandwich)
+library(ggpubr)
+library(kableExtra)
+
+
+
+```
+
+## Introduction 
+
+
+## Exercise 1
+
+
+
+```{r tabel1, echo=TRUE}
+setwd("C:/Users/adam/Documents/R") # Change to your own path
+tidy_finance <- dbConnect(SQLite(), "data/tidy_finance_ml.sqlite", extended_types = TRUE) # Connect to sql
+data <- tbl(tidy_finance, "stock_characteristics_monthly") %>%
+  select(permno:sic2, macro_bm,
+         macro_ntis,
+         macro_tbl,
+         macro_dp,
+         characteristic_mom1m,
+         characteristic_mvel1,
+         characteristic_mom12m,
+         characteristic_chmom,
+         characteristic_maxret) %>% collect()
+
+
+data_raw <- data %>%
+  drop_na(sic2) %>%
+  filter(month >= "2005-01-01") %>%
+  mutate(sic2 = as_factor(sic2)) %>%
+  arrange(month, permno)
+
+```
+# Variables
+The variables used are the following
+
+```{r}
+
+explanation <- data.frame(
+  "Variable_names" =  data_raw %>% select(month:characteristic_maxret) %>% select(-sic2) %>% colnames(),
+  "Explanation" = c("Month",
+                    "Excess returns",
+                    "Market Capitalization lagged",
+                    "Macro book-to-market",
+                    "Macro net equity expansion",
+                    "Macro treasure bill-rate",
+                    "Macro dividend-price ratio",
+                    "1-month momentum",
+                    "Log market equity",
+                    "12-month momentum",
+                    "Momentum change",
+                    "Recent maximum return"
+  ),
+  stringsAsFactors = FALSE
+)
+
+
+explanation %>% knitr::kable(caption = "Parameters descriptions")
+```
+## Exercise 1
+
+# Summary statistics
+
+
+The number of stocks in the sample from 2005-2020 is falling. 
+The sample starts with more than 4750 stocks in 2005, and ends with less than 3000 stocks in 2020. 
+
+```{r}
+data_raw %>%
+  group_by(month) %>%
+  summarise(n = n()) %>% arrange(desc(month)) %>%
+  ggplot(aes(x = month, y = n)) +
+  geom_line() +
+  labs(title = "Number of stocks from 2005-2020",
+       x = "",
+       y = "Number of stocks") 
+```
+
+
+
+
+The macro predictors illustrated.
+
+
+
+```{r}
+#Illustrations of the macroeconomic predictors
+x <- "Year"
+plot <- data_raw %>% group_by(month) %>% ggplot() + 
+  geom_line(aes(x = month, y = macro_bm)) + 
+  xlab(x) +
+  ylab("Book-to-market") + ggtitle("Figure 1: Book-to-market")+ theme_minimal()
+plot1 <- data_raw %>% ggplot() + 
+  geom_line(aes(x = month, y = macro_ntis)) +
+  xlab(x) +
+  ylab("Net equity expansion") + ggtitle("Figure 2: Net equity expansion") + theme_minimal()
+plot2 <- data_raw %>% group_by(month) %>% ggplot() + 
+  geom_line(aes(x = month, y = macro_tbl)) + 
+  xlab(x) +
+  ylab("Treasury-bill rate") + ggtitle("Figure 3: Treasury-bill rate") + theme_minimal()
+plot3 <- data_raw %>% group_by(month) %>% ggplot() + 
+  geom_line(aes(x = month, y = macro_dp)) + 
+  xlab(x) +
+  ylab("Dividend-price ratio") + ggtitle("Figure 4: Dividend-price ratio") + theme_minimal()
+
+ggarrange(plot, plot1, plot2, plot3 + rremove("x.text"), ncol = 2, nrow = 2)
+```
+
+From figure 1 we see Book-to-market has a steep increase before the financial crisis around 2008, and a sharp fall during the crisis.
+The net equity expansion in figure 2 falls prior and to the financial crisis and increase just before 2010. From figure 3 we se that the Treasure bill rate increases increases in the start, and then it is lowered before 2010 to stimulate the economy. In figure 4 the dividend-price ratio increases around 2008-2009 and falls shortly after.  
+
+
+
+# recipe
+
+
+We now create the recipe and fit our model. We remove month and the stock code so the to variables are not used as predictors. Furthermore we create interaction terms between stock characteristics variables and the macro predictors. 
+
+```{r}
+
+rec <- recipe(ret_excess ~ ., data = data_raw) %>%
+  step_rm(month, mktcap_lag, permno) %>%
+  step_interact(terms = ~ contains("characteristic"):contains("macro")) %>%
+  step_dummy(sic2, one_hot = TRUE, role = "predictor")
+```
+
+
+
+
+
+## Exercise 2 
+Limitations G(z) does not depend on the individual stock i or the time period t. It maintains its form over the entire timeperiod across all stocks for example to different stocks with different volatility would have the same estimated parameter value from a macro predictor. One could argue that each stock would have a different sensitivity towards for example the Treasury bill rate. These sensitivities are likely to be time dependent as well, for example sensitives might differ in high and low volatility periods. Overall this could prove an issue when it comes to the models ability to capture volatility clustering which often seen in financial data. 
+The first problem of g not depending on “i” could be resolved by running the estimation procedure on every single stock such that we get stock specific estimates. To overcome second problem  one could consider a rolling window estimation to put more weight on recent observation – which would help capture volatility clustering in data. 
+
+In the arbitrage theory one could consider “Z_t” as a regressor containing all relevant stock factors – excess returns on the market portfolio, HML, SMB etc. , which is set to have a linear correlation with expected excess returns.  
+
+An alternative way of modeling this could be to run the estimation on every single stock with some sort of rolling window estimation, such that old observation does 
+
+
+
+## Exercise 3
+
+# Objective function
+
+# Limitations
+If we want to predict future observation, then it would be unwise to fit a model on the entire data set. This would lead to over fitting with good prediction in sample, but poor out-of-sample predictions as bias would be too low and the variance to large. To overcome this, we use regularization in form of different hyperparameters that penalize the parameters and splitting our data set 3 groups training, validation, and testing. The limitation of this approach is that the validation sample fits are not truly out-of-sample as they are used for tuning, as it is input to the estimation. The results can however depend on the choice between training, and validation sets.   An alternative could be to do a k-fold cross validation procedure by randomly splitting observations into k non overlapping sets and could overcome potential randomness in regards to the choice of the validation set.  
+
+# Data spliting
+
+
+We make the split and the recipe folowing the instructions from the problem set.
+First we split data into a training and test dataset. Training data is 80 pct., test is 20 pct. Furthermore vi split training data into two groups, a training set and a validation set.
+
+```{r}
+data_split <- initial_time_split(
+  data_raw,
+  prop = 4 / 5
+)
+
+data_folds <- time_series_cv(
+  data = training(data_split),
+  date_var = month,
+  initial = 111,
+  assess = 36,
+  cumulative = FALSE,
+  slice_limit = 1
+)
+
+```
+
+
+## Exercise 4
+
+
+# Elastic net 
+
+The minimization problem is given by 
+
+$$
+\min (Y-X \beta)^{\prime}(Y-X \beta)+\lambda(1-\rho) \sum_{k=1}^{K}\left|\beta_{k}\right|+\frac{1}{2} \lambda \rho \sum_{k=1}^{K} \beta_{k}^{2}
+$$
+
+Elastic net is a hybrid of Ridge and Lasso regression. Elastic net uses to nonlinear hyperparameters $\lambda$ and $\rho$, where $\lambda$ is a shrinkage parameter and $\rho$ a weight parameter. In the case where $\rho=0$ the Elastic net corresponds to Lasso regression, and in the case where $\rho=1$ the Elastic net corresponds to Ridge regression.  Lasso regressions parameter penalization $l1$ penalizes the absolute sum of coefficients, while the ridged parameter penalization $l2$ penalizes the squared coefficients. The main difference between the two forms of penalization is that Lasso can set coefficients to zero and is therefore useful for reducing model complexity, while the ridged regression is used for shrinkage as coefficients tends towards zero as $lambda$ increases. The Elastic net therefore creates simple model through shrinkage and selection.
+
+
+# Random forrest
+
+To capture and model non-linear effects on expected returns we apply us a random forest. The Trees are used to observations with similar characteristics, and group them together. The trees have multiple decision sequences which is used to separate and group data best on different parameter characteristics. One tree can produce a large variance therefore we introduce a random forest to overcome the shortcoming. Growing a forest implies creating multiple decision trees. We want to ensure that each individual tree is not the same, we use a bootstrap to induce randomness to ensure errors in one tree do not spill over to other trees. In this case many uncorrelated models can together create predictions which are more accurate than a simple model.
+The predictions are given by 
+$$
+\hat{y}=\frac{1}{B} \sum_{i=1}^{B} \hat{y}_{T_{i}}
+$$
+Where B is the number of trees used, and $\hat{y}_{T_{i}}$ 
+# Objective function
+
+
+```{r}
+Hyperparameter_table <- matrix(cbind("$\\checkmark$", "$\\checkmark$", "$\\lambda\\in[10^{-10},1]$", "-", "$\\rho\\in\\{0,0.25,0.5,0.75,1\\}$", "-", '-', '[2,50]' ,'Data folds = 1','Data folds = 1,$\\text{ }$ Number of trees = 50,$\\text{ }$ mtry=33 '), ncol=2, byrow=TRUE)
+colnames(Hyperparameter_table) <- c('Elastic net', 'Random Forrest')
+rownames(Hyperparameter_table) <- c('MSPE', 'L1 (lambda)', 'L2 (rho)', 'min_n' , 'Others')
+Hyperparameter_table %>%
+  knitr::kable(digits = 0, 
+               caption = "Hyperparameters for both models"
+              ) %>%
+  kable_styling(latex_options = "hold_position") %>%
+  kable_classic(full_width = F, html_font = "Cambria")
+```
+Min_n is the minimal number of observations in the nodes. Mtry is the number of predictors randomly sampled as candidates at split. 
+
+
+In general we have that a more complex model will give better predictions in the training data. However if we for example add to many polynomials, so our in sample MSPE is as low as possible, we can face the issue of overfitting. In this case we would have almost perfect in sample predictions but our out of sample predictions would be poor. Therefore higher model complexity does not all ways lead to better predictions. One has to find a balance between variance and bias. 
+
+In the next section we train and validate our model for different hyperparameters. We then choose the model that gives the lowest MSPE in the validation set.
+As described earlier(section 3), the validation set is an attempt to create an out of sample test of our model.
+
+
+
+# Elastic net model tuning
+
+```{r}
+
+lm_model <- linear_reg(
+  penalty = tune(),
+  mixture = tune()
+) %>%
+  set_engine("glmnet", intercept = FALSE)
+
+# We add a workflow 
+
+lm_fit <- workflow() %>%
+  add_recipe(rec) %>%
+  add_model(lm_model)
+
+
+
+```
+
+
+
+```{r}
+lm_tune <- 
+  lm_fit %>% 
+  tune_grid(resample = data_folds,
+            grid = grid_regular(penalty(), mixture(), levels = c(10, 5)),
+            metrics = metric_set(rmse))
+
+```
+
+```{r}
+autoplot(lm_tune) +
+  labs(y = "Root mean-squared prediction error",
+       title = "MSPE for excess returns",
+       subtitle = "Lasso (1.0), Ridge (0.0), and Elastic Net (0.5) with different levels of regularization.")
+```
+The hyper parameters that minimizes the Root mean-squared prediction error for the elastic net model are a $0.75$ mixture with penalty $\lambda=0.07742637$. This gives a MSPE=0.1650091 in the validation set. 
+
+
+```{r}
+
+a <- lm_tune %>% collect_metrics()
+
+```
+
+
+```{r}
+best_lm <- lm_tune %>%  select_best()
+lm_final <- finalize_workflow(lm_fit, best_lm)
+lm_final_fit <- lm_final %>% fit(training(data_split))
+lm_final_fit <- last_fit(lm_final, data_split, metrics = metric_set(rmse))
+
+lm_rmse <- lm_final_fit %>%
+  collect_metrics()
+  
+
+predicted_values_lm <- lm_final_fit %>% collect_predictions()
+```
+
+```{r}
+testing(data_split) %>%
+select(permno:mktcap_lag) %>%
+bind_cols(lm_final_fit %>% pull(.predictions) %>% bind_rows() %>% select(.pred)) %>%
+summary()
+```
+
+
+
+# Random forrest model tuning
+
+```{r}
+
+
+# I will now make a random forrest model
+random_forrest_model <- 
+  rand_forest( min_n = tune(), trees = 50) %>% #we just set the number of threes to 50 so we do not have to many parameters to tune
+  set_engine("ranger") %>% 
+  set_mode("regression")
+
+# We add a random forrest workflow
+rf_workflow <- 
+  workflow() %>% 
+  add_model(random_forrest_model) %>% 
+  add_recipe(rec)
+
+# Now we can train and tune our model
+
+# We specify a grid
+rf_grid <- grid_regular(
+    min_n(range = c(2, 50)),
+  levels = 10
+)
+
+
+```
+
+
+```{r, cache = TRUE}
+rf_tune <- 
+  rf_workflow %>% 
+  tune_grid(resample = data_folds,
+            grid = rf_grid,
+            metrics = metric_set(rmse))
+
+```
+
+```{r}
+autoplot(rf_tune) +
+  labs(y = "Root mean-squared prediction error",
+       title = "MSPE for excess returns",
+       subtitle = )
+
+
+```
+
+For the Random forrest model we tuned searched for the optimal minimal number of observations in nodes. The minimal node size that minimises the MSPE is min_n$=50$. This give  MSPE=0.1741014 in the validation set.
+
+
+
+```{r}
+
+best_rf <- rf_tune %>%  select_best()
+
+rf_final <- finalize_workflow(rf_workflow, best_rf)
+rf_final_fit <- rf_final %>% fit(training(data_split))
+rf_final_fit <- last_fit(rf_final, data_split, metrics = metric_set(rmse))
+
+rf_rmse <- rf_final_fit %>%
+  collect_metrics()
+
+
+predicted_values_rf <- rf_final_fit %>% collect_predictions()
+
+
+```
+
+```{r}
+testing(data_split) %>%
+select(permno:mktcap_lag) %>%
+bind_cols(rf_final_fit %>% pull(.predictions) %>% bind_rows() %>% select(.pred)) %>%
+summary()
+```
+
+
+
+## EX 5
+```{r}
+tidy_finance2 <- dbConnect(SQLite(), "data/tidy_finance.sqlite", extended_types = TRUE) # Connect to sql
+factors_ff_monthly <- tbl(tidy_finance2, "factors_ff_monthly") %>% collect()
+```
+\newline
+We merge the predictions.  
+```{r}
+factors_ff_monthly <- tbl(tidy_finance2, "factors_ff_monthly") %>% collect()
+test_data <- testing(data_split) 
+y_model <- cbind(test_data,predicted_values_lm$.pred,predicted_values_rf$.pred)
+y_model <-rename(y_model, predicted_ret_lm = 'predicted_values_lm$.pred',predicted_ret_rf = 'predicted_values_rf$.pred' )
+```
+
+\newline
+create a function that assign portolios deciles. 
+```{r}
+assign_portfolio <- function(data, var, n_portfolios) {
+  breakpoints <- data %>%
+    summarize(breakpoint = quantile({{ var }},
+                                    probs = seq(0, 1, length.out = n_portfolios + 1),
+                                    na.rm = TRUE
+    )) %>%
+    pull(breakpoint) %>%
+    as.numeric()
+  
+  data %>%
+    mutate(portfolio = findInterval({{ var }},
+                                    breakpoints,
+                                    all.inside = TRUE
+    )) %>%
+    pull(portfolio)
+}
+
+```
+
+\newline
+We create a portofolio sorted each month on the predicted returns of the linear model
+```{r}
+pred_portfolios <- y_model %>%
+  group_by(month) %>%
+  mutate(
+    portfolio = assign_portfolio(
+      data = cur_data(),
+      var = predicted_ret_rf,
+      n_portfolios = 10
+    ),
+    portfolio = as.factor(portfolio)
+  ) %>%
+  group_by(portfolio, month) %>%
+  summarize(ret = weighted.mean(ret_excess, mktcap_lag),  .groups = "drop")
+```
+
+```{r}
+pred_portfolios_summary <- pred_portfolios %>%
+  left_join(factors_ff_monthly, by = "month") %>%
+  group_by(portfolio) %>%
+  summarise(
+    alpha = as.numeric(lm(ret ~ 1 + mkt_excess)$coefficients[1]),
+    beta = as.numeric(lm(ret ~ 1 + mkt_excess)$coefficients[2]),
+    ret = mean(ret),
+  )
+```
+
+```{r}
+# We loock at jensens-alpha
+pred_portfolios_summary %>%
+  ggplot(aes(x = portfolio, y = alpha, fill = portfolio)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Alphas of value weighted pred-sorted portfolios",
+    x = "Portfolio",
+    y = "CAPM alpha",
+    fill = "Portfolio"
+  ) +
+  scale_y_continuous(labels = percent) +
+  theme(legend.position = "None")
+
+```
+```{r}
+# We look at CAPM beta
+pred_portfolios_summary %>%
+  ggplot(aes(x = portfolio, y = beta, fill = portfolio)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Betas of  value weighted pred-sorted portfolios",
+    x = "Portfolio",
+    y = "CAPM beta",
+    fill = "Portfolio"
+  ) +
+  scale_y_continuous(labels = percent) +
+  theme(legend.position = "None")
+
+```
+\newline
+We take the high minus low to see if the our strategy delivers significant better risk-adjusted Returns, using HAC standerros to take heteroskedasticity and autocorrlation into account. Looking at the t-values we see that the strategy fails to deliver significant risk adjusted returns.  
+```{r}
+# We evaluate the prediction trading stragegy go long in past winners and short past losers
+pred_longshort <- pred_portfolios %>%
+  ungroup() %>%
+  mutate(portfolio = case_when(
+    portfolio == max(as.numeric(portfolio)) ~ "high",
+    portfolio == min(as.numeric(portfolio)) ~ "low"
+  )) %>%
+  filter(portfolio %in% c("low", "high")) %>%
+  pivot_wider(month, names_from = portfolio, values_from = ret) %>%
+  mutate(long_short = high - low) %>%
+  left_join(factors_ff_monthly, by = "month")
+
+# We take a look at the returns the strategy creates, using HAC standard error.
+
+coeftest(lm(long_short ~ 1 + mkt_excess, data = pred_longshort), vcovHAC)
+```
+
+# Fama french 3-factor model
+\newline
+we this time use fama french 3 factor model to see if we might capture variations, in smb and hml, to see if this might crate better estimates.
+
+```{r}
+pred_portfolios_summary_famafrench <- pred_portfolios %>%
+  left_join(factors_ff_monthly, by = "month") %>%
+  group_by(portfolio) %>%
+  summarise(
+    alpha = as.numeric(lm(ret ~ 1 + mkt_excess + hml + smb)$coefficients[1]),
+    beta = as.numeric(lm(ret ~ 1 + mkt_excess + hml + smb)$coefficients[2]),
+    ret = mean(ret)
+  )
+```
+
+```{r}
+# We loock at jensens-alpha
+pred_portfolios_summary_famafrench %>%
+  ggplot(aes(x = portfolio, y = alpha, fill = portfolio)) +
+  geom_bar(stat = "identity") +
+  labs(
+    title = "Alphas of value weighted pred-sorted_fama_french portfolios",
+    x = "Portfolio",
+    y = "CAPM alpha",
+    fill = "Portfolio"
+  ) +
+  scale_y_continuous(labels = percent) +
+  theme(legend.position = "None")
+
+```
+
+```{r}
+# We look at CAPM beta
+pred_portfolios_summary_famafrench %>%
+  ggplot(aes(x = portfolio, y = beta, fill = portfolio)) +
+  geom_bar(stat = "identity") +
+  labs(
+title = "Betas of  value weighted pred-sorted_fama_french portfolios",
+    x = "Portfolio",
+    y = "CAPM beta",
+    fill = "Portfolio"
+  ) +
+  scale_y_continuous(labels = percent) +
+  theme(legend.position = "None")
+
+```
+
+\newline
+we do the same as before this time using the 3-factor regression model.  we unfortunately have to conclude that this does not provide better results interms of the significants of the risk-adjsuted returns. 
+```{r}
+# We evaluate the prediction trading stragegy go long in past winners and short past losers
+pred_longshort_fama_french <- pred_portfolios %>%
+  ungroup() %>%
+  mutate(portfolio = case_when(
+    portfolio == max(as.numeric(portfolio)) ~ "high",
+    portfolio == min(as.numeric(portfolio)) ~ "low"
+  )) %>%
+  filter(portfolio %in% c("low", "high")) %>%
+  pivot_wider(month, names_from = portfolio, values_from = ret) %>%
+  mutate(long_short = high - low) %>%
+  left_join(factors_ff_monthly, by = "month")
+
+# We take a look at the returns the strategy creates, using HAC standard error.
+
+coeftest(lm(long_short ~ 1 + mkt_excess + hml + smb, data = pred_longshort), vcovHAC)
+```
+
